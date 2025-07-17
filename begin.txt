@@ -1,0 +1,8 @@
+1. Activate environment
+  conda activate exercise *Check (exercise) before command line
+
+2. Enter ssh
+  ssh zl749@10.5.208.192
+
+3. Pull data
+  cd /data/MarketScan_data
