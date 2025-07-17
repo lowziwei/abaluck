@@ -6,6 +6,7 @@
       matplotlib
       pandas
       duckdb 
+      pyarrow 
     
 2. Enter ssh
   ssh zl749@10.5.208.192
