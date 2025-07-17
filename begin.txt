@@ -1,8 +1,25 @@
 1. Activate environment
   conda activate exercise *Check (exercise) before command line
-
+  A. Install packages
+      python
+      numpy
+      matplotlib
+      pandas
+      duckdb 
+    
 2. Enter ssh
   ssh zl749@10.5.208.192
 
 3. Pull data
   cd /data/MarketScan_data
+  
+  A. COMMERCIAL_SET_A | MEDICARE_SET_A | Medicaid
+    COMMERCIAL_SET_A contains CCAE_D_2014.parquet variations for D = (F, O, T), variations for 2014 = (2015...2024), CCAE_S.parquet, and CCAE_A.parquet
+
+4. Write python scripts
+  vim exercise.py
+
+5. When in editor
+  Press "I" to insert
+  Press "esc" to exit
+  Enter ":wq" to write and quit
