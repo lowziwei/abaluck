@@ -2,10 +2,10 @@ import duckdb
 import pandas as pd
 
 #prelim
-DATASET_TYPE = "COMMERCIAL_SET_A"  # Change this (e.g., "COMMERCIAL_SET_B", "MEDICARE_SET_A")
-DATABASE = "CCAE"                  # Change this (e.g., "MDCR", "CCAEI")  
-TABLE_CODE = "D"                   # Change this (e.g., "O", "I", "S")
-YEAR = "2014"                      # Change this (e.g., "2015", "2016")
+DATASET_TYPE = "COMMERCIAL_SET_A"  # {"COMMERCIAL_SET_A" "COMMERCIAL_SET_B", "MEDICARE_SET_A"}
+DATABASE = "CCAE"                  # {"CCAE", "MDCR", "CCAEI"}  
+TABLE_CODE = "D"                   # {"A", "T", "I", "S", "O", "D", "F", "R", "L")
+YEAR = "2014"                      # {"2014", ..., "2024"}
 
 # 
 file_path = f"/data/MarketScan_data/{DATASET_TYPE}/{DATABASE}_{TABLE_CODE}_{YEAR}.parquet"
