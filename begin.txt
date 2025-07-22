@@ -25,6 +25,7 @@
   Press "esc" to exit
   Enter ":wq" to write and quit
   Enter ":%d" to delete all 
+  Enter CTRL + X to kill python program
 
 
 *Semaglutide National Drug Code (NDC):
