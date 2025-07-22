@@ -27,6 +27,10 @@
   Enter ":%d" to delete all 
   Enter CTRL + X to kill python program
 
+6. Troubleshooting commands
+  Enter "free -h" to see how much memory storage is still available
+  
+
 
 *Semaglutide National Drug Code (NDC):
 #Ozempic
