@@ -29,7 +29,7 @@
 
 6. Troubleshooting commands
   Enter "free -h" to see how much memory storage is still available
-  
+  Enter "pkill -9 -u zl749" to kill 
 
 
 *Semaglutide National Drug Code (NDC):
