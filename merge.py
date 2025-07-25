@@ -1,264 +1,268 @@
 import duckdb
 import pandas as pd
 import time
+import gc
+import matplotlib.pyplot as plt
+from pathlib import Path
 
 # Configuration
 START_YEAR = 2018
-END_YEAR = 2024
+END_YEAR = 2018
 DATASET_TYPE = "COMMERCIAL_SET_A"
 DATABASE = "CCAE"
-CHUNK_SIZE = 200000
+CHUNK_SIZE = 50000
 
-def process_year_fast_fixed(year):
+def process_year_sql_approach(year):
     print(f"\n{'='*60}")
-    print(f"FAST PROCESSING YEAR {year} - WITH OUTPATIENT + INPATIENT")
+    print(f"SQL APPROACH PROCESSING YEAR {year}")
     print(f"{'='*60}")
 
+    # File paths
     d_file = f"/data/MarketScan_data/{DATASET_TYPE}/{DATABASE}_D_{year}.parquet"
     o_file = f"/data/MarketScan_data/{DATASET_TYPE}/{DATABASE}_O_{year}.parquet"
-    i_file = f"/data/MarketScan_data/{DATASET_TYPE}/{DATABASE}_I_{year}.parquet"  # Added inpatient file
 
+    # Verify files exist
+    for file_type, file_path in [('Prescription', d_file), ('Outpatient', o_file)]:
+        if not Path(file_path).exists():
+            print(f"ERROR: Missing {file_type} file: {file_path}")
+            return None
+
+    # Initialize DuckDB
+    conn = duckdb.connect()
+    conn.execute("SET memory_limit='6GB'")
+    conn.execute("SET threads=3")
+    
     total_start_time = time.time()
 
-    # Step 1: Load unique ENROLIDs from prescriptions to chunk better
-    print("Step 1: Getting unique ENROLIDs for chunking...")
-    enrolid_df = conn.execute(f"""
-        SELECT DISTINCT ENROLID
-        FROM '{d_file}'
-        ORDER BY ENROLID
-    """).fetchdf()
-
-    total_patients = len(enrolid_df)
-    chunks = [enrolid_df.iloc[i:i + CHUNK_SIZE]['ENROLID'].tolist() for i in range(0, total_patients, CHUNK_SIZE)]
-
-    print(f"  Total patients: {total_patients:,}, Chunks: {len(chunks)}")
-
-    # Step 2: Cache BOTH outpatient AND inpatient visits for year
-    print("\nStep 2: Caching outpatient AND inpatient visits...")
-    step2_start = time.time()
-    
-    # First check file sizes
     try:
-        o_count = conn.execute(f"SELECT COUNT(*) FROM '{o_file}'").fetchone()[0]
-        print(f"  Outpatient file: {o_count:,} rows")
-    except Exception as e:
-        print(f"  WARNING: Could not access outpatient file: {e}")
-        o_count = 0
-    
-    try:
-        i_count = conn.execute(f"SELECT COUNT(*) FROM '{i_file}'").fetchone()[0]
-        print(f"  Inpatient file: {i_count:,} rows")
-    except Exception as e:
-        print(f"  WARNING: Could not access inpatient file: {e}")
-        i_count = 0
-    
-    total_visits = o_count + i_count
-    print(f"  Total visits to cache: {total_visits:,} rows")
-    
-    # Cache both files together
-    conn.execute(f"""
-        CREATE OR REPLACE TEMP TABLE cached_visits AS
-        SELECT ENROLID, SVCDATE, NPI, 'Outpatient' as source_type
-        FROM '{o_file}'
-        UNION ALL
-        SELECT ENROLID, SVCDATE, NPI, 'Inpatient' as source_type  
-        FROM '{i_file}'
-    """)
-    
-    cached_count = conn.execute("SELECT COUNT(*) FROM cached_visits").fetchone()[0]
-    step2_time = time.time() - step2_start
-    print(f"  Cached visits: {cached_count:,} rows in {step2_time:.1f} seconds")
-    
-    # Show breakdown by source
-    source_breakdown = conn.execute("""
-        SELECT source_type, COUNT(*) as visit_count
-        FROM cached_visits
-        GROUP BY source_type
-        ORDER BY source_type
-    """).df()
-    print("  Source breakdown:")
-    print(source_breakdown.to_string(index=False, justify='left'))
-
-    # Step 3: Prepare result storage
-    conn.execute("""
-        CREATE OR REPLACE TEMP TABLE npi_counts_all AS
-        SELECT 
-            CAST(NULL AS BIGINT) as ENROLID,
-            CAST(NULL AS DATE) as original_svcdate,
-            CAST(NULL AS INTEGER) as unique_npis,
-            CAST(NULL AS VARCHAR) as npi_sources
-        WHERE FALSE
-    """)
-
-    # Step 4: Process chunks
-    print("\nStep 3: Processing chunks with temporal join ±3 days")
-    successful_chunks = 0
-    
-    for chunk_idx, chunk_ids in enumerate(chunks, start=1):
-        print(f"  Chunk {chunk_idx}/{len(chunks)}: {len(chunk_ids):,} ENROLIDs")
+        # Step 1: Get unique ENROLIDs for chunking (only ENROLID column)
+        print("\nStep 1: Getting unique ENROLIDs for chunking...")
+        enrolid_query = f"""
+            SELECT DISTINCT ENROLID
+            FROM '{d_file}'
+            WHERE ENROLID IS NOT NULL
+            ORDER BY ENROLID
+        """
         
-        try:
-            # Create temporary table for chunk ENROLIDs
-            conn.execute("CREATE OR REPLACE TEMP TABLE chunk_enrolids AS SELECT NULL::BIGINT AS ENROLID WHERE FALSE")
+        enrolid_df = conn.execute(enrolid_query).fetchdf()
+        total_patients = len(enrolid_df)
+        chunks = [enrolid_df.iloc[i:i + CHUNK_SIZE]['ENROLID'].tolist() 
+                 for i in range(0, total_patients, CHUNK_SIZE)]
+        
+        print(f"  Total patients: {total_patients:,}, Chunks: {len(chunks)}")
+        
+        del enrolid_df
+        gc.collect()
+
+        # Step 2: Cache ONLY relevant columns from outpatient file
+        print("\nStep 2: Caching outpatient data (ENROLID, SVCDATE, NPI only)...")
+        conn.execute(f"""
+            CREATE TEMP TABLE remaining_outpatient AS
+            SELECT ENROLID, SVCDATE, NPI
+            FROM '{o_file}'
+            WHERE ENROLID IS NOT NULL 
+              AND SVCDATE IS NOT NULL 
+              AND NPI IS NOT NULL
+        """)
+        
+        conn.execute("CREATE INDEX idx_remaining_enrolid ON remaining_outpatient(ENROLID)")
+        initial_count = conn.execute("SELECT COUNT(*) FROM remaining_outpatient").fetchone()[0]
+        print(f"  Cached outpatient visits: {initial_count:,} (3 columns only)")
+
+        # Step 3: Process chunks and progressively remove processed ENROLIDs
+        print(f"\nStep 3: Processing {len(chunks)} chunks with progressive filtering...")
+        all_results = []
+
+        for chunk_idx, chunk_enrolids in enumerate(chunks):
+            chunk_start = time.time()
             
-            # Insert ENROLIDs in batches to avoid memory issues
-            batch_size = 1000
-            for i in range(0, len(chunk_ids), batch_size):
-                batch = chunk_ids[i:i + batch_size]
-                values_str = ",".join(f"({eid})" for eid in batch)
-                conn.execute(f"INSERT INTO chunk_enrolids VALUES {values_str}")
-            
-            # Process chunk with JOIN instead of IN clause
-            conn.execute(f"""
-                WITH chunk_prescriptions AS (
-                    SELECT DISTINCT p.ENROLID, p.SVCDATE
-                    FROM '{d_file}' p
-                    INNER JOIN chunk_enrolids c ON p.ENROLID = c.ENROLID
+            # Check how many outpatient records remain
+            remaining_count = conn.execute("SELECT COUNT(*) FROM remaining_outpatient").fetchone()[0]
+            print(f"  Chunk {chunk_idx + 1}/{len(chunks)} ({len(chunk_enrolids):,} patients, {remaining_count:,} outpatient records left)")
+
+            try:
+                enrolid_list = "', '".join(map(str, chunk_enrolids))
+
+                # Process this chunk using remaining outpatient data (only relevant columns)
+                chunk_query = f"""
+                WITH 
+                -- Get ONLY ENROLID, SVCDATE from prescription file for this chunk
+                first_prescriptions AS (
+                    SELECT ENROLID, SVCDATE,
+                           ROW_NUMBER() OVER (PARTITION BY ENROLID, SVCDATE ORDER BY ENROLID) as rn
+                    FROM (
+                        SELECT ENROLID, SVCDATE
+                        FROM '{d_file}'
+                        WHERE ENROLID IS NOT NULL 
+                          AND SVCDATE IS NOT NULL
+                          AND ENROLID IN ('{enrolid_list}')
+                    )
                 ),
-                chunk_visits AS (
-                    SELECT v.ENROLID, v.SVCDATE, v.NPI, v.source_type
-                    FROM cached_visits v
-                    INNER JOIN chunk_enrolids c ON v.ENROLID = c.ENROLID
+                chunk_prescriptions AS (
+                    SELECT ENROLID, SVCDATE as prescription_date
+                    FROM first_prescriptions 
+                    WHERE rn = 1
                 ),
-                chunk_npi_counts AS (
+                -- Join prescriptions to remaining physicians within ±3 days
+                matched_visits AS (
                     SELECT 
                         p.ENROLID,
-                        p.SVCDATE AS original_svcdate,
-                        COALESCE(COUNT(DISTINCT o.NPI), 0) AS unique_npis,
-                        STRING_AGG(DISTINCT o.source_type, '|') as npi_sources
+                        p.prescription_date,
+                        o.SVCDATE as physician_date,
+                        o.NPI
                     FROM chunk_prescriptions p
-                    LEFT JOIN chunk_visits o 
-                        ON p.ENROLID = o.ENROLID
-                        AND o.SVCDATE BETWEEN (p.SVCDATE - INTERVAL 3 DAY) 
-                                          AND (p.SVCDATE + INTERVAL 3 DAY)
-                    GROUP BY p.ENROLID, p.SVCDATE
+                    INNER JOIN remaining_outpatient o 
+                        ON p.ENROLID = o.ENROLID 
+                        AND o.SVCDATE BETWEEN (p.prescription_date - INTERVAL 3 DAY) 
+                                          AND (p.prescription_date + INTERVAL 3 DAY)
                 )
-                INSERT INTO npi_counts_all
-                SELECT * FROM chunk_npi_counts
-            """)
-            
-            # Clean up chunk table
-            conn.execute("DROP TABLE chunk_enrolids")
-            successful_chunks += 1
-            
-        except Exception as e:
-            print(f"    ERROR in chunk {chunk_idx}: {e}")
-            break
+                -- Count unique NPIs per prescription
+                SELECT 
+                    ENROLID,
+                    prescription_date,
+                    COUNT(DISTINCT NPI) as unique_npi_count,
+                    COUNT(*) as total_visits,
+                    ARRAY_AGG(DISTINCT NPI ORDER BY NPI) as npi_list
+                FROM matched_visits
+                GROUP BY ENROLID, prescription_date
+                ORDER BY ENROLID, prescription_date
+                """
+
+                chunk_result = conn.execute(chunk_query).fetchdf()
+                
+                if not chunk_result.empty:
+                    all_results.append(chunk_result)
+
+                # REMOVE processed ENROLIDs from remaining outpatient data
+                conn.execute(f"""
+                    DELETE FROM remaining_outpatient 
+                    WHERE ENROLID IN ('{enrolid_list}')
+                """)
+
+                chunk_time = time.time() - chunk_start
+                after_delete_count = conn.execute("SELECT COUNT(*) FROM remaining_outpatient").fetchone()[0]
+                print(f"    Results: {len(chunk_result):,} prescription events in {chunk_time:.1f}s")
+                print(f"    Outpatient records after deletion: {after_delete_count:,}")
+
+                # Clean up
+                del chunk_result, chunk_enrolids
+                
+                # Garbage collection every 10 chunks
+                if (chunk_idx + 1) % 10 == 0:
+                    gc.collect()
+                    print(f"    Memory cleanup")
+
+            except Exception as e:
+                print(f"    ERROR in chunk {chunk_idx + 1}: {e}")
+                continue
+
+        # Step 4: Combine results
+        print(f"\nStep 3: Combining {len(all_results)} chunks...")
         
-        # Progress update every 10 chunks
-        if chunk_idx % 10 == 0:
-            elapsed = time.time() - total_start_time
-            rate = chunk_idx / elapsed * 60
-            print(f"    Progress: {chunk_idx}/{len(chunks)} chunks ({elapsed:.1f}s, {rate:.1f} chunks/min)")
+        if not all_results:
+            print("ERROR: No successful chunks!")
+            return None
 
-    print(f"  Successfully processed {successful_chunks}/{len(chunks)} chunks")
+        final_df = pd.concat(all_results, ignore_index=True)
+        print(f"  Final dataset: {len(final_df):,} prescription events with provider matches")
 
-    # Step 5: Create histogram and save results
-    print("\nStep 4: Computing histogram and source analysis...")
-    
-    # Basic histogram
-    histogram_data = conn.execute("""
-        SELECT 
-            unique_npis,
-            COUNT(*) as patient_date_count,
-            COUNT(*) * 100.0 / SUM(COUNT(*)) OVER() as percentage
-        FROM npi_counts_all
-        GROUP BY unique_npis
-        ORDER BY unique_npis
-    """).df()
+        del all_results
+        gc.collect()
 
-    print("NPI Count Histogram:")
-    print(histogram_data.to_string(index=False))
-    histogram_data.to_csv(f"/home/zl749/npi_histogram_combined_{year}.csv", index=False)
+        # Step 5: Create histogram
+        print("\nStep 4: Creating histogram...")
+        histogram_data = final_df['unique_npi_count'].value_counts().sort_index()
+        total_events = len(final_df)
+        
+        print("\nHistogram of Unique NPI Counts per Prescription Event:")
+        print("=" * 60)
+        for npi_count, frequency in histogram_data.items():
+            percentage = (frequency / total_events) * 100
+            print(f"  {npi_count:2d} NPI(s): {frequency:6,} events ({percentage:5.1f}%)")
 
-    # Source breakdown for cases with NPIs
-    print("\nSource breakdown for cases with NPIs:")
-    source_analysis = conn.execute("""
-        SELECT 
-            npi_sources,
-            COUNT(*) as count,
-            COUNT(*) * 100.0 / SUM(COUNT(*)) OVER() as percentage
-        FROM npi_counts_all
-        WHERE unique_npis > 0
-        GROUP BY npi_sources
-        ORDER BY count DESC
-    """).df()
-    print(source_analysis.to_string(index=False))
-    source_analysis.to_csv(f"/home/zl749/source_breakdown_{year}.csv", index=False)
+        # Create visual histogram
+        plt.figure(figsize=(10, 6))
+        plt.bar(histogram_data.index, histogram_data.values)
+        plt.xlabel('Number of Unique NPIs per Prescription Event')
+        plt.ylabel('Frequency')
+        plt.title(f'Distribution of Provider Counts per Prescription Event - {year}')
+        plt.grid(True, alpha=0.3)
+        
+        # Add percentage labels
+        for npi_count, freq in histogram_data.items():
+            pct = (freq / total_events) * 100
+            plt.text(npi_count, freq + max(histogram_data.values) * 0.01, 
+                    f'{pct:.1f}%', ha='center', va='bottom')
+        
+        plt.tight_layout()
+        histogram_file = f'npi_histogram_{year}.png'
+        plt.savefig(histogram_file, dpi=300, bbox_inches='tight')
+        print(f"\nHistogram saved as: {histogram_file}")
 
-    total_npi_counts = conn.execute("SELECT COUNT(*) FROM npi_counts_all").fetchone()[0]
-    unique_npi_count = conn.execute("SELECT COUNT(*) FROM npi_counts_all WHERE unique_npis = 1").fetchone()[0]
-    
-    # Additional statistics
-    outpatient_only = conn.execute("SELECT COUNT(*) FROM npi_counts_all WHERE npi_sources = 'Outpatient' AND unique_npis = 1").fetchone()[0]
-    inpatient_only = conn.execute("SELECT COUNT(*) FROM npi_counts_all WHERE npi_sources = 'Inpatient' AND unique_npis = 1").fetchone()[0]
-    both_sources = conn.execute("SELECT COUNT(*) FROM npi_counts_all WHERE npi_sources = 'Inpatient|Outpatient' AND unique_npis = 1").fetchone()[0]
+        # Step 6: Single NPI subset
+        print("\nStep 5: Single NPI subset...")
+        single_npi_df = final_df[final_df['unique_npi_count'] == 1].copy()
+        
+        print(f"  Single NPI cases: {len(single_npi_df):,} ({len(single_npi_df)/len(final_df)*100:.1f}%)")
 
-    print(f"\nAssignment Statistics:")
-    print(f"  Total prescriptions: {total_npi_counts:,}")
-    print(f"  Cases with exactly 1 NPI: {unique_npi_count:,} ({unique_npi_count / total_npi_counts * 100:.1f}%)")
-    print(f"    - From Outpatient only: {outpatient_only:,}")
-    print(f"    - From Inpatient only: {inpatient_only:,}")
-    print(f"    - From Both sources: {both_sources:,}")
-    
-    improvement = (unique_npi_count - outpatient_only) / outpatient_only * 100 if outpatient_only > 0 else 0
-    print(f"  Improvement from adding Inpatient: +{improvement:.1f}%")
+        # Clean up single NPI data
+        single_npi_clean = single_npi_df[['ENROLID', 'prescription_date', 'total_visits']].copy()
+        single_npi_clean['NPI'] = single_npi_df['npi_list'].apply(lambda x: x[0] if x else None)
 
-    # Save unique NPI cases
-    conn.execute(f"""
-        COPY (
-            SELECT ENROLID, original_svcdate, npi_sources
-            FROM npi_counts_all
-            WHERE unique_npis = 1
-        ) TO '/home/zl749/unique_npi_cases_combined_{year}.csv' (FORMAT 'csv', HEADER)
-    """)
+        # Step 7: Save files
+        print("\nStep 6: Saving results...")
+        
+        merged_file = f'merged_prescriptions_providers_{year}.parquet'
+        final_df.to_parquet(merged_file, compression='snappy')
+        
+        single_npi_file = f'single_npi_prescriptions_{year}.parquet'
+        single_npi_clean.to_parquet(single_npi_file, compression='snappy')
+        
+        histogram_df = pd.DataFrame({
+            'unique_npi_count': histogram_data.index,
+            'frequency': histogram_data.values,
+            'percentage': (histogram_data.values / total_events) * 100
+        })
+        histogram_data_file = f'npi_histogram_data_{year}.csv'
+        histogram_df.to_csv(histogram_data_file, index=False)
 
-    # Clean up
-    conn.execute("DROP TABLE npi_counts_all")
-    conn.execute("DROP TABLE cached_visits")
+        total_time = time.time() - total_start_time
+        
+        print(f"\n{'='*60}")
+        print(f"SQL APPROACH COMPLETE - {total_time:.1f} seconds")
+        print(f"Files: {merged_file}, {single_npi_file}, {histogram_data_file}")
+        print(f"{'='*60}")
 
-    elapsed = time.time() - total_start_time
-    print(f"\nYear {year} completed in {elapsed:.2f} seconds ({elapsed / 60:.1f} minutes)")
-    print(f"Files created:")
-    print(f"  - /home/zl749/npi_histogram_combined_{year}.csv")
-    print(f"  - /home/zl749/source_breakdown_{year}.csv")
-    print(f"  - /home/zl749/unique_npi_cases_combined_{year}.csv")
-    
-    return True, total_npi_counts, unique_npi_count, improvement
+        return {
+            'merged_data': final_df,
+            'single_npi_data': single_npi_clean,
+            'histogram_data': histogram_df
+        }
 
-# Main execution
-conn = duckdb.connect()
-conn.execute("SET memory_limit='12GB'")  # Increased for both files
-conn.execute("SET threads=6")
-
-successful_years = []
-failed_years = []
-
-for year in range(START_YEAR, END_YEAR + 1):
-    try:
-        success, total_counts, unique_counts, improvement = process_year_fast_fixed(year)
-        if success:
-            print(f"✓ {year}: {total_counts:,} total, {unique_counts:,} unique (+{improvement:.1f}% improvement)")
-            successful_years.append((year, total_counts, unique_counts, improvement))
-        time.sleep(2)  # Brief pause between years
     except Exception as e:
-        print(f"✗ {year}: ERROR - {e}")
-        failed_years.append(year)
-
-# Summary
-if successful_years:
-    print(f"\n{'='*60}")
-    print("FINAL SUMMARY - OUTPATIENT + INPATIENT ANALYSIS")
-    print(f"{'='*60}")
-    total_improvement = sum(imp for _, _, _, imp in successful_years) / len(successful_years)
-    print(f"Average improvement from adding Inpatient data: +{total_improvement:.1f}%")
+        print(f"ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
     
-    print("\nYear-by-year results:")
-    print("Year | Total      | Assignable | Assignment% | Improvement")
-    print("-" * 60)
-    for year, total, unique, imp in successful_years:
-        pct = unique/total*100 if total > 0 else 0
-        print(f"{year} | {total:9,} | {unique:9,} | {pct:8.1f}% | +{imp:6.1f}%")
+    finally:
+        try:
+            conn.close()
+        except:
+            pass
+        gc.collect()
 
-conn.close()
-print("All years completed!")
+def main():
+    print("MarketScan Analysis - SQL APPROACH")
+    print("=" * 40)
+    
+    for year in range(START_YEAR, END_YEAR + 1):
+        try:
+            result = process_year_sql_approach(year)
+            if result is not None:
+                print(f"Success for year {year}!")
+        except Exception as e:
+            print(f"Failed year {year}: {e}")
+
+if __name__ == "__main__":
+    main()
