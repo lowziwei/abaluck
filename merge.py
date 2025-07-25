@@ -5,16 +5,16 @@ import gc
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-# Configuration
+# Configuration - FULL DATASET
 START_YEAR = 2018
 END_YEAR = 2018
 DATASET_TYPE = "COMMERCIAL_SET_A"
 DATABASE = "CCAE"
 CHUNK_SIZE = 50000
 
-def process_year_sql_approach(year):
+def process_full_year(year):
     print(f"\n{'='*60}")
-    print(f"SQL APPROACH PROCESSING YEAR {year}")
+    print(f"FULL DATASET PROCESSING - YEAR {year}")
     print(f"{'='*60}")
 
     # File paths
@@ -35,8 +35,10 @@ def process_year_sql_approach(year):
     total_start_time = time.time()
 
     try:
-        # Step 1: Get unique ENROLIDs for chunking (only ENROLID column)
-        print("\nStep 1: Getting unique ENROLIDs for chunking...")
+        # Step 1: Get ALL unique ENROLIDs for chunking
+        print("\nStep 1: Getting ALL unique ENROLIDs for chunking...")
+        step1_start = time.time()
+        
         enrolid_query = f"""
             SELECT DISTINCT ENROLID
             FROM '{d_file}'
@@ -49,83 +51,78 @@ def process_year_sql_approach(year):
         chunks = [enrolid_df.iloc[i:i + CHUNK_SIZE]['ENROLID'].tolist() 
                  for i in range(0, total_patients, CHUNK_SIZE)]
         
-        print(f"  Total patients: {total_patients:,}, Chunks: {len(chunks)}")
+        step1_time = time.time() - step1_start
+        print(f"  Total patients: {total_patients:,}")
+        print(f"  Total chunks: {len(chunks)} (size: {CHUNK_SIZE:,} each)")
+        print(f"  Step 1 completed in {step1_time:.1f} seconds")
         
         del enrolid_df
         gc.collect()
 
-        # Step 2: Cache ONLY relevant columns from outpatient file
-        print("\nStep 2: Caching outpatient data (ENROLID, SVCDATE, NPI only)...")
-        conn.execute(f"""
-            CREATE TEMP TABLE remaining_outpatient AS
-            SELECT ENROLID, SVCDATE, NPI
-            FROM '{o_file}'
-            WHERE ENROLID IS NOT NULL 
-              AND SVCDATE IS NOT NULL 
-              AND NPI IS NOT NULL
-        """)
-        
-        conn.execute("CREATE INDEX idx_remaining_enrolid ON remaining_outpatient(ENROLID)")
-        initial_count = conn.execute("SELECT COUNT(*) FROM remaining_outpatient").fetchone()[0]
-        print(f"  Cached outpatient visits: {initial_count:,} (3 columns only)")
-
-        # Step 3: Process chunks and progressively remove processed ENROLIDs
-        print(f"\nStep 3: Processing {len(chunks)} chunks with progressive filtering...")
+        # Step 2: Process ALL chunks with AGGRESSIVE memory management
+        print(f"\nStep 2: Processing ALL {len(chunks)} chunks with aggressive memory optimization...")
         all_results = []
 
         for chunk_idx, chunk_enrolids in enumerate(chunks):
             chunk_start = time.time()
-            
-            # Check how many outpatient records remain
-            remaining_count = conn.execute("SELECT COUNT(*) FROM remaining_outpatient").fetchone()[0]
-            print(f"  Chunk {chunk_idx + 1}/{len(chunks)} ({len(chunk_enrolids):,} patients, {remaining_count:,} outpatient records left)")
+            print(f"  Chunk {chunk_idx + 1}/{len(chunks)} ({len(chunk_enrolids):,} patients)")
 
             try:
                 enrolid_list = "', '".join(map(str, chunk_enrolids))
 
-                # Process this chunk using remaining outpatient data (only relevant columns)
+                # AGGRESSIVE APPROACH: Everything in one optimized query
                 chunk_query = f"""
                 WITH 
-                -- Get ONLY ENROLID, SVCDATE from prescription file for this chunk
-                first_prescriptions AS (
+                -- Step 1: From file D, get ONLY ENROLID, SVCDATE for chunk X patients
+                chunk_prescriptions_raw AS (
+                    SELECT ENROLID, SVCDATE
+                    FROM '{d_file}'
+                    WHERE ENROLID IS NOT NULL 
+                      AND SVCDATE IS NOT NULL
+                      AND ENROLID IN ('{enrolid_list}')
+                ),
+                -- Keep first row per ENROLID, SVCDATE (as specified)
+                chunk_prescriptions AS (
                     SELECT ENROLID, SVCDATE,
                            ROW_NUMBER() OVER (PARTITION BY ENROLID, SVCDATE ORDER BY ENROLID) as rn
-                    FROM (
-                        SELECT ENROLID, SVCDATE
-                        FROM '{d_file}'
-                        WHERE ENROLID IS NOT NULL 
-                          AND SVCDATE IS NOT NULL
-                          AND ENROLID IN ('{enrolid_list}')
-                    )
+                    FROM chunk_prescriptions_raw
                 ),
-                chunk_prescriptions AS (
-                    SELECT ENROLID, SVCDATE as prescription_date
-                    FROM first_prescriptions 
+                unique_chunk_prescriptions AS (
+                    SELECT ENROLID, SVCDATE
+                    FROM chunk_prescriptions
                     WHERE rn = 1
                 ),
-                -- Join prescriptions to remaining physicians within ±3 days
+                -- Step 2: From file O, get ONLY ENROLID, SVCDATE, NPI for chunk X patients  
+                chunk_outpatient AS (
+                    SELECT ENROLID, SVCDATE, NPI
+                    FROM '{o_file}'
+                    WHERE ENROLID IS NOT NULL 
+                      AND SVCDATE IS NOT NULL 
+                      AND ENROLID IN ('{enrolid_list}')
+                ),
+                -- Step 3: Merge with +/- 3 day SVCDATE band around prescriptions
                 matched_visits AS (
                     SELECT 
                         p.ENROLID,
-                        p.prescription_date,
+                        p.SVCDATE,
                         o.SVCDATE as physician_date,
                         o.NPI
-                    FROM chunk_prescriptions p
-                    INNER JOIN remaining_outpatient o 
+                    FROM unique_chunk_prescriptions p
+                    INNER JOIN chunk_outpatient o 
                         ON p.ENROLID = o.ENROLID 
-                        AND o.SVCDATE BETWEEN (p.prescription_date - INTERVAL 3 DAY) 
-                                          AND (p.prescription_date + INTERVAL 3 DAY)
+                        AND o.SVCDATE BETWEEN (p.SVCDATE - INTERVAL 3 DAY) 
+                                          AND (p.SVCDATE + INTERVAL 3 DAY)
                 )
-                -- Count unique NPIs per prescription
+                -- Step 4: Collapse to count UNIQUE NPIs per ENROLID, SVCDATE (excluding NULLs from count)
                 SELECT 
                     ENROLID,
-                    prescription_date,
-                    COUNT(DISTINCT NPI) as unique_npi_count,
+                    SVCDATE as prescription_date,
+                    COUNT(DISTINCT CASE WHEN NPI IS NOT NULL THEN NPI END) as unique_npi_count,
                     COUNT(*) as total_visits,
-                    ARRAY_AGG(DISTINCT NPI ORDER BY NPI) as npi_list
+                    ARRAY_AGG(DISTINCT CASE WHEN NPI IS NOT NULL THEN NPI END) as npi_list
                 FROM matched_visits
-                GROUP BY ENROLID, prescription_date
-                ORDER BY ENROLID, prescription_date
+                GROUP BY ENROLID, SVCDATE
+                ORDER BY ENROLID, SVCDATE
                 """
 
                 chunk_result = conn.execute(chunk_query).fetchdf()
@@ -133,30 +130,23 @@ def process_year_sql_approach(year):
                 if not chunk_result.empty:
                     all_results.append(chunk_result)
 
-                # REMOVE processed ENROLIDs from remaining outpatient data
-                conn.execute(f"""
-                    DELETE FROM remaining_outpatient 
-                    WHERE ENROLID IN ('{enrolid_list}')
-                """)
-
                 chunk_time = time.time() - chunk_start
-                after_delete_count = conn.execute("SELECT COUNT(*) FROM remaining_outpatient").fetchone()[0]
                 print(f"    Results: {len(chunk_result):,} prescription events in {chunk_time:.1f}s")
-                print(f"    Outpatient records after deletion: {after_delete_count:,}")
+                print(f"    Memory: Data for chunk {chunk_idx + 1} automatically discarded")
 
-                # Clean up
+                # Clean up chunk data (aggressive cleanup)
                 del chunk_result, chunk_enrolids
                 
-                # Garbage collection every 10 chunks
-                if (chunk_idx + 1) % 10 == 0:
+                # More frequent garbage collection for aggressive memory management
+                if (chunk_idx + 1) % 5 == 0:
                     gc.collect()
-                    print(f"    Memory cleanup")
+                    print(f"    Aggressive memory cleanup performed")
 
             except Exception as e:
                 print(f"    ERROR in chunk {chunk_idx + 1}: {e}")
                 continue
 
-        # Step 4: Combine results
+        # Step 3: Combine all results
         print(f"\nStep 3: Combining {len(all_results)} chunks...")
         
         if not all_results:
@@ -169,12 +159,12 @@ def process_year_sql_approach(year):
         del all_results
         gc.collect()
 
-        # Step 5: Create histogram
+        # Step 4: Create histogram
         print("\nStep 4: Creating histogram...")
         histogram_data = final_df['unique_npi_count'].value_counts().sort_index()
         total_events = len(final_df)
         
-        print("\nHistogram of Unique NPI Counts per Prescription Event:")
+        print(f"\nHistogram of Unique NPI Counts per Prescription Event:")
         print("=" * 60)
         for npi_count, frequency in histogram_data.items():
             percentage = (frequency / total_events) * 100
@@ -199,7 +189,7 @@ def process_year_sql_approach(year):
         plt.savefig(histogram_file, dpi=300, bbox_inches='tight')
         print(f"\nHistogram saved as: {histogram_file}")
 
-        # Step 6: Single NPI subset
+        # Step 5: Single NPI subset
         print("\nStep 5: Single NPI subset...")
         single_npi_df = final_df[final_df['unique_npi_count'] == 1].copy()
         
@@ -209,7 +199,7 @@ def process_year_sql_approach(year):
         single_npi_clean = single_npi_df[['ENROLID', 'prescription_date', 'total_visits']].copy()
         single_npi_clean['NPI'] = single_npi_df['npi_list'].apply(lambda x: x[0] if x else None)
 
-        # Step 7: Save files
+        # Step 6: Save files
         print("\nStep 6: Saving results...")
         
         merged_file = f'merged_prescriptions_providers_{year}.parquet'
@@ -229,8 +219,15 @@ def process_year_sql_approach(year):
         total_time = time.time() - total_start_time
         
         print(f"\n{'='*60}")
-        print(f"SQL APPROACH COMPLETE - {total_time:.1f} seconds")
-        print(f"Files: {merged_file}, {single_npi_file}, {histogram_data_file}")
+        print(f"FULL DATASET COMPLETE - {total_time/60:.1f} minutes")
+        print(f"{'='*60}")
+        print(f"Processed: {total_patients:,} patients")
+        print(f"Results: {len(final_df):,} prescription events")
+        print(f"Files created:")
+        print(f"  - {merged_file}")
+        print(f"  - {single_npi_file}")
+        print(f"  - {histogram_data_file}")
+        print(f"  - {histogram_file}")
         print(f"{'='*60}")
 
         return {
@@ -253,16 +250,15 @@ def process_year_sql_approach(year):
         gc.collect()
 
 def main():
-    print("MarketScan Analysis - SQL APPROACH")
+    print("MarketScan Analysis - FULL DATASET")
     print("=" * 40)
     
-    for year in range(START_YEAR, END_YEAR + 1):
-        try:
-            result = process_year_sql_approach(year)
-            if result is not None:
-                print(f"Success for year {year}!")
-        except Exception as e:
-            print(f"Failed year {year}: {e}")
+    result = process_full_year(2018)
+    
+    if result:
+        print("\n🎉 Full dataset processing completed successfully!")
+    else:
+        print("\n❌ Processing failed")
 
 if __name__ == "__main__":
     main()
