@@ -5,16 +5,16 @@ import gc
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-# Configuration - TEST VERSION
+# Configuration - FIRST CHUNK TEST
 START_YEAR = 2018
 END_YEAR = 2018
 DATASET_TYPE = "COMMERCIAL_SET_A"
 DATABASE = "CCAE"
-TEST_PATIENTS = 200000  # Test with first 200k patients
+TEST_CHUNK_SIZE = 200000  # First 200k patients
 
-def test_first_200k_patients(year):
+def test_first_chunk_null_fix(year):
     print(f"\n{'='*60}")
-    print(f"TEST: FIRST 200,000 PATIENTS - YEAR {year}")
+    print(f"FIRST CHUNK TEST - 200k PATIENTS (NULL NPI FIX)")
     print(f"{'='*60}")
 
     # File paths
@@ -32,11 +32,11 @@ def test_first_200k_patients(year):
     conn.execute("SET memory_limit='6GB'")
     conn.execute("SET threads=3")
     
-    overall_start_time = time.time()
+    total_start_time = time.time()
 
     try:
         # Step 1: Get first 200k patients
-        print("\nStep 1: Getting first 200,000 patients...")
+        print(f"\nStep 1: Getting first {TEST_CHUNK_SIZE:,} patients...")
         step1_start = time.time()
         
         enrolid_query = f"""
@@ -44,7 +44,7 @@ def test_first_200k_patients(year):
             FROM '{d_file}'
             WHERE ENROLID IS NOT NULL
             ORDER BY ENROLID
-            LIMIT {TEST_PATIENTS}
+            LIMIT {TEST_CHUNK_SIZE}
         """
         
         test_enrolids = conn.execute(enrolid_query).fetchdf()['ENROLID'].tolist()
@@ -52,96 +52,95 @@ def test_first_200k_patients(year):
         
         print(f"  Selected {len(test_enrolids):,} patients in {step1_time:.2f} seconds")
 
-        # Step 2: Cache outpatient data for these patients only
-        print("\nStep 2: Caching outpatient data for test patients...")
+        # Step 2: Process this chunk with NULL NPI fix
+        print(f"\nStep 2: Processing chunk with NULL NPI handling...")
         step2_start = time.time()
         
         enrolid_list = "', '".join(map(str, test_enrolids))
-        
-        conn.execute(f"""
-            CREATE TEMP TABLE test_outpatient AS
+
+        chunk_query = f"""
+        WITH 
+        -- Step 1: From file D, get ONLY ENROLID, SVCDATE for test patients
+        chunk_prescriptions_raw AS (
+            SELECT ENROLID, SVCDATE
+            FROM '{d_file}'
+            WHERE ENROLID IS NOT NULL 
+              AND SVCDATE IS NOT NULL
+              AND ENROLID IN ('{enrolid_list}')
+        ),
+        -- Keep first row per ENROLID, SVCDATE 
+        chunk_prescriptions AS (
+            SELECT ENROLID, SVCDATE,
+                   ROW_NUMBER() OVER (PARTITION BY ENROLID, SVCDATE ORDER BY ENROLID) as rn
+            FROM chunk_prescriptions_raw
+        ),
+        unique_chunk_prescriptions AS (
+            SELECT ENROLID, SVCDATE
+            FROM chunk_prescriptions
+            WHERE rn = 1
+        ),
+        -- Step 2: From file O, get ENROLID, SVCDATE, NPI (INCLUDING NULL NPIs!)
+        chunk_outpatient AS (
             SELECT ENROLID, SVCDATE, NPI
             FROM '{o_file}'
             WHERE ENROLID IS NOT NULL 
               AND SVCDATE IS NOT NULL 
-              AND NPI IS NOT NULL
               AND ENROLID IN ('{enrolid_list}')
-        """)
-        
-        conn.execute("CREATE INDEX idx_test_out ON test_outpatient(ENROLID)")
-        outpatient_count = conn.execute("SELECT COUNT(*) FROM test_outpatient").fetchone()[0]
-        step2_time = time.time() - step2_start
-        
-        print(f"  Cached {outpatient_count:,} outpatient visits in {step2_time:.2f} seconds")
-
-        # Step 3: Process prescriptions for test patients
-        print("\nStep 3: Processing prescriptions for test patients...")
-        step3_start = time.time()
-        
-        main_query = f"""
-        WITH 
-        -- Get ONLY ENROLID, SVCDATE from prescription file for test patients
-        first_prescriptions AS (
-            SELECT ENROLID, SVCDATE,
-                   ROW_NUMBER() OVER (PARTITION BY ENROLID, SVCDATE ORDER BY ENROLID) as rn
-            FROM (
-                SELECT ENROLID, SVCDATE
-                FROM '{d_file}'
-                WHERE ENROLID IS NOT NULL 
-                  AND SVCDATE IS NOT NULL
-                  AND ENROLID IN ('{enrolid_list}')
-            )
         ),
-        test_prescriptions AS (
-            SELECT ENROLID, SVCDATE as prescription_date
-            FROM first_prescriptions 
-            WHERE rn = 1
-        ),
-        -- Join prescriptions to outpatient visits within ±3 days
+        -- Step 3: Merge with +/- 3 day SVCDATE band
         matched_visits AS (
             SELECT 
                 p.ENROLID,
-                p.prescription_date,
+                p.SVCDATE,
                 o.SVCDATE as physician_date,
                 o.NPI
-            FROM test_prescriptions p
-            INNER JOIN test_outpatient o 
+            FROM unique_chunk_prescriptions p
+            INNER JOIN chunk_outpatient o 
                 ON p.ENROLID = o.ENROLID 
-                AND o.SVCDATE BETWEEN (p.prescription_date - INTERVAL 3 DAY) 
-                                  AND (p.prescription_date + INTERVAL 3 DAY)
+                AND o.SVCDATE BETWEEN (p.SVCDATE - INTERVAL 3 DAY) 
+                                  AND (p.SVCDATE + INTERVAL 3 DAY)
         )
-        -- Count unique NPIs per prescription
+        -- Step 4: Collapse counting only non-NULL NPIs
         SELECT 
             ENROLID,
-            prescription_date,
-            COUNT(DISTINCT NPI) as unique_npi_count,
+            SVCDATE as prescription_date,
+            COUNT(DISTINCT CASE WHEN NPI IS NOT NULL THEN NPI END) as unique_npi_count,
             COUNT(*) as total_visits,
-            ARRAY_AGG(DISTINCT NPI ORDER BY NPI) as npi_list
+            COUNT(CASE WHEN NPI IS NULL THEN 1 END) as null_npi_visits,
+            ARRAY_AGG(DISTINCT CASE WHEN NPI IS NOT NULL THEN NPI END) as npi_list
         FROM matched_visits
-        GROUP BY ENROLID, prescription_date
-        ORDER BY ENROLID, prescription_date
+        GROUP BY ENROLID, SVCDATE
+        ORDER BY ENROLID, SVCDATE
         """
 
-        final_df = conn.execute(main_query).fetchdf()
-        step3_time = time.time() - step3_start
+        final_df = conn.execute(chunk_query).fetchdf()
+        step2_time = time.time() - step2_start
         
-        print(f"  Processed {len(final_df):,} prescription events in {step3_time:.2f} seconds")
+        print(f"  Processed {len(final_df):,} prescription events in {step2_time:.1f} seconds")
 
-        # Step 4: Create histogram
-        print("\nStep 4: Creating histogram...")
-        step4_start = time.time()
+        # Step 3: Analyze results
+        print(f"\nStep 3: Analysis of results...")
         
         if len(final_df) > 0:
+            # NULL NPI analysis
+            events_with_nulls = (final_df['null_npi_visits'] > 0).sum()
+            print(f"  Prescription events with NULL NPI visits: {events_with_nulls:,} ({events_with_nulls/len(final_df)*100:.1f}%)")
+            
+            # Events per patient
+            events_per_patient = len(final_df) / len(test_enrolids)
+            print(f"  Events per patient: {events_per_patient:.2f}")
+            
+            # Histogram
             histogram_data = final_df['unique_npi_count'].value_counts().sort_index()
             total_events = len(final_df)
             
-            print(f"\nHistogram Results (200k patients sample):")
+            print(f"\nHistogram (first {TEST_CHUNK_SIZE:,} patients):")
             print("=" * 50)
             for npi_count, frequency in histogram_data.items():
                 percentage = (frequency / total_events) * 100
                 print(f"  {npi_count:2d} NPI(s): {frequency:6,} events ({percentage:5.1f}%)")
-            
-            # Single NPI cases
+                
+            # Single NPI summary
             single_npi_count = histogram_data.get(1, 0)
             single_npi_pct = (single_npi_count / total_events) * 100 if total_events > 0 else 0
             
@@ -150,38 +149,28 @@ def test_first_200k_patients(year):
             
         else:
             print("  No prescription events found!")
-            
-        step4_time = time.time() - step4_start
-        print(f"  Histogram created in {step4_time:.2f} seconds")
 
-        # Overall timing
-        total_time = time.time() - overall_start_time
+        total_time = time.time() - total_start_time
         
         print(f"\n{'='*60}")
-        print(f"TEST COMPLETE - TIMING BREAKDOWN")
+        print(f"FIRST CHUNK TEST COMPLETE - {total_time:.1f} seconds")
         print(f"{'='*60}")
-        print(f"Step 1 (Get 200k patients):     {step1_time:6.2f} seconds")
-        print(f"Step 2 (Cache outpatient):      {step2_time:6.2f} seconds") 
-        print(f"Step 3 (Process & join):        {step3_time:6.2f} seconds")
-        print(f"Step 4 (Create histogram):      {step4_time:6.2f} seconds")
-        print(f"{'='*60}")
-        print(f"TOTAL TIME:                     {total_time:6.2f} seconds")
-        print(f"{'='*60}")
+        print(f"Patients processed: {len(test_enrolids):,}")
+        print(f"Prescription events: {len(final_df):,}")
+        print(f"Processing rate: {len(test_enrolids)/total_time:,.0f} patients/second")
         
         if len(final_df) > 0:
-            print(f"Processing rate: {len(test_enrolids)/total_time:,.0f} patients/second")
-            print(f"Estimated time for full dataset: {(total_time * len(test_enrolids) / TEST_PATIENTS) / 60:.1f} minutes")
+            print(f"Events per patient: {len(final_df)/len(test_enrolids):.2f}")
+            print(f"NULL NPI fix working: {events_with_nulls:,} events kept that would have been lost")
         
+        print(f"{'='*60}")
+
         return {
             'patients_processed': len(test_enrolids),
-            'prescription_events': len(final_df) if len(final_df) > 0 else 0,
+            'prescription_events': len(final_df),
             'total_time': total_time,
-            'step_times': {
-                'get_patients': step1_time,
-                'cache_outpatient': step2_time, 
-                'process_join': step3_time,
-                'histogram': step4_time
-            }
+            'events_per_patient': len(final_df)/len(test_enrolids),
+            'null_npi_events': events_with_nulls if len(final_df) > 0 else 0
         }
 
     except Exception as e:
@@ -198,16 +187,19 @@ def test_first_200k_patients(year):
         gc.collect()
 
 def main():
-    print("MarketScan Analysis - 200K PATIENT TEST")
+    print("MarketScan Analysis - FIRST CHUNK TEST")
+    print("Testing NULL NPI fix on first 200k patients")
     print("=" * 50)
     
-    result = test_first_200k_patients(2018)
+    result = test_first_chunk_null_fix(2018)
     
     if result:
-        print("\n🎉 Test completed successfully!")
-        print("Ready to run full dataset? (Results will help estimate total time)")
+        print(f"\n🎉 First chunk test completed!")
+        print(f"Events per patient: {result['events_per_patient']:.2f}")
+        print(f"NULL NPI events preserved: {result['null_npi_events']:,}")
+        print("Ready to run full dataset if numbers look good!")
     else:
-        print("\n❌ Test failed - need to debug before running full dataset")
+        print("\n❌ Test failed")
 
 if __name__ == "__main__":
     main()
