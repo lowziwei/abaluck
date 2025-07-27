@@ -3,8 +3,6 @@ import pandas as pd
 import time
 import gc
 import matplotlib.pyplot as plt
-import glob
-import os
 from pathlib import Path
 
 # Configuration - FIRST 200K PATIENTS TEST
@@ -140,26 +138,8 @@ def test_first_200k_patients(year):
             print(f"  Events per patient: {events_per_patient:.2f}")
             
             # Histogram
-            # Create visual histogram
-            plt.figure(figsize=(10, 6))
-            plt.bar(histogram_data.index, histogram_data.values)
-            plt.xlabel('Number of Unique NPIs per Prescription Event')
-            plt.ylabel('Frequency')
-            plt.title(f'Distribution of Provider Counts per Prescription Event - First {TEST_PATIENT_LIMIT:,} Patients')
-            plt.grid(True, alpha=0.3)
-            
-            # Add percentage labels
-            for npi_count, freq in histogram_data.items():
-                pct = (freq / total_events) * 100
-                plt.text(npi_count, freq + max(histogram_data.values) * 0.01, 
-                        f'{pct:.1f}%', ha='center', va='bottom')
-            
-            plt.tight_layout()
-            histogram_file = f'npi_histogram_first_{TEST_PATIENT_LIMIT//1000}k_{year}.png'
-            plt.savefig(histogram_file, dpi=300, bbox_inches='tight')
-            print(f"  Histogram saved as: {histogram_file}")
-        else:
-            print("  No data to plot histogram")
+            histogram_data = final_df['unique_npi_count'].value_counts().sort_index()
+            total_events = len(final_df)
             
             print(f"\nHistogram (first {TEST_PATIENT_LIMIT:,} patients):")
             print("=" * 50)
@@ -182,6 +162,27 @@ def test_first_200k_patients(year):
         if len(final_df) > 0:
             histogram_data = final_df['unique_npi_count'].value_counts().sort_index()
             total_events = len(final_df)
+
+            # Create visual histogram
+            plt.figure(figsize=(10, 6))
+            plt.bar(histogram_data.index, histogram_data.values)
+            plt.xlabel('Number of Unique NPIs per Prescription Event')
+            plt.ylabel('Frequency')
+            plt.title(f'Distribution of Provider Counts per Prescription Event - First {TEST_PATIENT_LIMIT:,} Patients')
+            plt.grid(True, alpha=0.3)
+            
+            # Add percentage labels
+            for npi_count, freq in histogram_data.items():
+                pct = (freq / total_events) * 100
+                plt.text(npi_count, freq + max(histogram_data.values) * 0.01, 
+                        f'{pct:.1f}%', ha='center', va='bottom')
+            
+            plt.tight_layout()
+            histogram_file = f'npi_histogram_first_{TEST_PATIENT_LIMIT//1000}k_{year}.png'
+            plt.savefig(histogram_file, dpi=300, bbox_inches='tight')
+            print(f"  Histogram saved as: {histogram_file}")
+        else:
+            print("  No data to plot histogram")
 
         total_time = time.time() - total_start_time
         
