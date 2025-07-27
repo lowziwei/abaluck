@@ -62,38 +62,7 @@ def process_full_year_with_saves(year):
         del enrolid_df
         gc.collect()
 
-        # Step 2: Cache ALL data once, then progressively delete
-        print("\nStep 2: Caching ALL data for progressive deletion...")
-        step2_start = time.time()
-        
-        # Cache ALL prescription data (only needed columns)
-        print("  Caching ALL prescription data...")
-        conn.execute(f"""
-            CREATE TEMP TABLE remaining_prescriptions AS
-            SELECT ENROLID, SVCDATE
-            FROM '{d_file}'
-            WHERE ENROLID IS NOT NULL AND SVCDATE IS NOT NULL
-        """)
-        conn.execute("CREATE INDEX idx_remaining_presc ON remaining_prescriptions(ENROLID)")
-        
-        # Cache ALL outpatient data (only needed columns)
-        print("  Caching ALL outpatient data...")
-        conn.execute(f"""
-            CREATE TEMP TABLE remaining_outpatient AS
-            SELECT ENROLID, SVCDATE, NPI
-            FROM '{o_file}'
-            WHERE ENROLID IS NOT NULL AND SVCDATE IS NOT NULL
-        """)
-        conn.execute("CREATE INDEX idx_remaining_out ON remaining_outpatient(ENROLID)")
-        
-        presc_count = conn.execute("SELECT COUNT(*) FROM remaining_prescriptions").fetchone()[0]
-        out_count = conn.execute("SELECT COUNT(*) FROM remaining_outpatient").fetchone()[0]
-        
-        step2_time = time.time() - step2_start
-        print(f"  Cached {presc_count:,} prescriptions and {out_count:,} outpatient visits")
-        print(f"  Step 2 completed in {step2_time:.1f} seconds")
-
-        # Step 2: Cache ALL data once (we need to search across all for matches)
+         # Step 2: Cache ALL data once (we need to search across all for matches)
         print("\nStep 2: Caching ALL data for progressive deletion...")
         step2_start = time.time()
         
