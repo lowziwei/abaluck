@@ -62,11 +62,11 @@ def process_full_year_with_saves(year):
         del enrolid_df
         gc.collect()
 
-         # Step 2: Cache ALL data once (we need to search across all for matches)
-        print("\nStep 2: Caching ALL data for progressive deletion...")
+         # Step 2: Cache data once
+        print("\nStep 2: Caching data for progressive deletion...")
         step2_start = time.time()
         
-        # Cache ALL prescription data (only needed columns)
+        # Cache prescription data (only needed columns)
         print("  Caching ALL prescription data...")
         conn.execute(f"""
             CREATE TEMP TABLE remaining_prescriptions AS
