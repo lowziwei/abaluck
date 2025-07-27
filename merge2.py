@@ -13,7 +13,7 @@ START_YEAR = 2018
 END_YEAR = 2018
 DATASET_TYPE = "COMMERCIAL_SET_A"
 DATABASE = "CCAE"
-CHUNK_SIZE = 50000
+CHUNK_SIZE = 100000
 SAVE_EVERY = 10  # Save intermediate results every 10 chunks
 
 def process_full_year_with_saves(year):
