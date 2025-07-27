@@ -1,3 +1,4 @@
+#Does not cache files. Only reads rows where ENROLID matches chunk ENROLID.
 import duckdb
 import pandas as pd
 import time
