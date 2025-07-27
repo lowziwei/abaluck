@@ -3,21 +3,18 @@ import pandas as pd
 import time
 import gc
 import matplotlib.pyplot as plt
-import glob
-import os
 from pathlib import Path
 
-# Configuration - BATCH PROCESSING WITH INTERMEDIATE SAVES
-START_YEAR = 2018
-END_YEAR = 2018
+# Configuration - MULTI-YEAR DATASET
+START_YEAR = 2014
+END_YEAR = 2024  
 DATASET_TYPE = "COMMERCIAL_SET_A"
 DATABASE = "CCAE"
 CHUNK_SIZE = 50000
-SAVE_EVERY = 10  # Save intermediate results every 10 chunks
 
-def process_full_year_with_saves(year):
+def process_single_year(year):
     print(f"\n{'='*60}")
-    print(f"BATCH PROCESSING WITH SAVES - YEAR {year}")
+    print(f"PROCESSING YEAR {year}")
     print(f"{'='*60}")
 
     # File paths
@@ -35,11 +32,11 @@ def process_full_year_with_saves(year):
     conn.execute("SET memory_limit='6GB'")
     conn.execute("SET threads=3")
     
-    total_start_time = time.time()
+    year_start_time = time.time()
 
     try:
         # Step 1: Get ALL unique ENROLIDs for chunking
-        print("\nStep 1: Getting ALL unique ENROLIDs for chunking...")
+        print(f"\nStep 1: Getting unique ENROLIDs for {year} chunking...")
         step1_start = time.time()
         
         enrolid_query = f"""
@@ -55,109 +52,37 @@ def process_full_year_with_saves(year):
                  for i in range(0, total_patients, CHUNK_SIZE)]
         
         step1_time = time.time() - step1_start
-        print(f"  Total patients: {total_patients:,}")
-        print(f"  Total chunks: {len(chunks)} (size: {CHUNK_SIZE:,} each)")
+        print(f"  Year {year} - Total patients: {total_patients:,}")
+        print(f"  Year {year} - Total chunks: {len(chunks)} (size: {CHUNK_SIZE:,} each)")
         print(f"  Step 1 completed in {step1_time:.1f} seconds")
         
         del enrolid_df
         gc.collect()
 
-        # Step 2: Cache ALL data once, then progressively delete
-        print("\nStep 2: Caching ALL data for progressive deletion...")
-        step2_start = time.time()
-        
-        # Cache ALL prescription data (only needed columns)
-        print("  Caching ALL prescription data...")
-        conn.execute(f"""
-            CREATE TEMP TABLE remaining_prescriptions AS
-            SELECT ENROLID, SVCDATE
-            FROM '{d_file}'
-            WHERE ENROLID IS NOT NULL AND SVCDATE IS NOT NULL
-        """)
-        conn.execute("CREATE INDEX idx_remaining_presc ON remaining_prescriptions(ENROLID)")
-        
-        # Cache ALL outpatient data (only needed columns)
-        print("  Caching ALL outpatient data...")
-        conn.execute(f"""
-            CREATE TEMP TABLE remaining_outpatient AS
-            SELECT ENROLID, SVCDATE, NPI
-            FROM '{o_file}'
-            WHERE ENROLID IS NOT NULL AND SVCDATE IS NOT NULL
-        """)
-        conn.execute("CREATE INDEX idx_remaining_out ON remaining_outpatient(ENROLID)")
-        
-        presc_count = conn.execute("SELECT COUNT(*) FROM remaining_prescriptions").fetchone()[0]
-        out_count = conn.execute("SELECT COUNT(*) FROM remaining_outpatient").fetchone()[0]
-        
-        step2_time = time.time() - step2_start
-        print(f"  Cached {presc_count:,} prescriptions and {out_count:,} outpatient visits")
-        print(f"  Step 2 completed in {step2_time:.1f} seconds")
-
-        # Step 2: Cache ALL data once (we need to search across all for matches)
-        print("\nStep 2: Caching ALL data for progressive deletion...")
-        step2_start = time.time()
-        
-        # Cache ALL prescription data (only needed columns)
-        print("  Caching ALL prescription data...")
-        conn.execute(f"""
-            CREATE TEMP TABLE remaining_prescriptions AS
-            SELECT ENROLID, SVCDATE
-            FROM '{d_file}'
-            WHERE ENROLID IS NOT NULL AND SVCDATE IS NOT NULL
-        """)
-        conn.execute("CREATE INDEX idx_remaining_presc ON remaining_prescriptions(ENROLID)")
-        
-        # Cache ALL outpatient data (only needed columns)
-        print("  Caching ALL outpatient data...")
-        conn.execute(f"""
-            CREATE TEMP TABLE remaining_outpatient AS
-            SELECT ENROLID, SVCDATE, NPI
-            FROM '{o_file}'
-            WHERE ENROLID IS NOT NULL AND SVCDATE IS NOT NULL
-        """)
-        conn.execute("CREATE INDEX idx_remaining_out ON remaining_outpatient(ENROLID)")
-        
-        presc_count = conn.execute("SELECT COUNT(*) FROM remaining_prescriptions").fetchone()[0]
-        out_count = conn.execute("SELECT COUNT(*) FROM remaining_outpatient").fetchone()[0]
-        
-        step2_time = time.time() - step2_start
-        print(f"  Cached {presc_count:,} prescriptions and {out_count:,} outpatient visits")
-        print(f"  Step 2 completed in {step2_time:.1f} seconds")
-
-        # Step 3: Process chunks with progressive deletion
-        print(f"\nStep 3: Processing {len(chunks)} chunks with progressive deletion...")
-        
-        # Clean up any existing intermediate files
-        intermediate_files = glob.glob(f'chunks_batch_*.parquet')
-        for f in intermediate_files:
-            os.remove(f)
-            
-        current_batch_results = []
-        batch_number = 0
+        # Step 2: Process ALL chunks with AGGRESSIVE memory management
+        print(f"\nStep 2: Processing {len(chunks)} chunks for year {year}...")
+        all_results = []
 
         for chunk_idx, chunk_enrolids in enumerate(chunks):
             chunk_start = time.time()
-            
-            # Check remaining data
-            remaining_presc = conn.execute("SELECT COUNT(*) FROM remaining_prescriptions").fetchone()[0]
-            remaining_out = conn.execute("SELECT COUNT(*) FROM remaining_outpatient").fetchone()[0]
-            
-            print(f"  Chunk {chunk_idx + 1}/{len(chunks)} ({len(chunk_enrolids):,} patients)")
-            print(f"    Remaining: {remaining_presc:,} prescriptions, {remaining_out:,} outpatient")
+            chunk_name = f"{year}_chunk_{chunk_idx + 1:03d}"  # Format: 2018_chunk_001
+            print(f"  Processing {chunk_name} ({len(chunk_enrolids):,} patients)")
 
             try:
                 enrolid_list = "', '".join(map(str, chunk_enrolids))
 
-                # Process ONLY current chunk's ENROLIDs
+                # AGGRESSIVE APPROACH: Everything in one optimized query
                 chunk_query = f"""
                 WITH 
-                -- Get prescription data ONLY for current chunk ENROLIDs
+                -- Step 1: From file D, get ONLY ENROLID, SVCDATE for chunk patients
                 chunk_prescriptions_raw AS (
                     SELECT ENROLID, SVCDATE
-                    FROM remaining_prescriptions
-                    WHERE ENROLID IN ('{enrolid_list}')
+                    FROM '{d_file}'
+                    WHERE ENROLID IS NOT NULL 
+                      AND SVCDATE IS NOT NULL
+                      AND ENROLID IN ('{enrolid_list}')
                 ),
-                -- Keep first row per ENROLID, SVCDATE
+                -- Keep first row per ENROLID, SVCDATE (as specified)
                 chunk_prescriptions AS (
                     SELECT ENROLID, SVCDATE,
                            ROW_NUMBER() OVER (PARTITION BY ENROLID, SVCDATE ORDER BY ENROLID) as rn
@@ -168,29 +93,34 @@ def process_full_year_with_saves(year):
                     FROM chunk_prescriptions
                     WHERE rn = 1
                 ),
-                -- Get outpatient data ONLY for current chunk ENROLIDs
+                -- Step 2: From file O, get ONLY ENROLID, SVCDATE, NPI for chunk patients  
                 chunk_outpatient AS (
                     SELECT ENROLID, SVCDATE, NPI
-                    FROM remaining_outpatient
-                    WHERE ENROLID IN ('{enrolid_list}')
+                    FROM '{o_file}'
+                    WHERE ENROLID IS NOT NULL 
+                      AND SVCDATE IS NOT NULL 
+                      AND ENROLID IN ('{enrolid_list}')
                 ),
-                -- Merge chunk prescription with chunk outpatient (±3 days)
+                -- Step 3: Merge with +/- 3 day SVCDATE band around prescriptions
                 matched_visits AS (
                     SELECT 
                         p.ENROLID,
                         p.SVCDATE,
+                        o.SVCDATE as physician_date,
                         o.NPI
                     FROM unique_chunk_prescriptions p
-                    LEFT JOIN chunk_outpatient o 
+                    INNER JOIN chunk_outpatient o 
                         ON p.ENROLID = o.ENROLID 
                         AND o.SVCDATE BETWEEN (p.SVCDATE - INTERVAL 3 DAY) 
                                           AND (p.SVCDATE + INTERVAL 3 DAY)
                 )
-                -- Count unique NPIs per prescription
+                -- Step 4: Collapse to count UNIQUE NPIs per ENROLID, SVCDATE (excluding NULLs from count)
                 SELECT 
                     ENROLID,
-                    SVCDATE,
-                    COUNT(DISTINCT CASE WHEN NPI IS NOT NULL THEN NPI END) as unique_npi_count
+                    SVCDATE as prescription_date,
+                    COUNT(DISTINCT CASE WHEN NPI IS NOT NULL THEN NPI END) as unique_npi_count,
+                    COUNT(*) as total_visits,
+                    ARRAY_AGG(DISTINCT CASE WHEN NPI IS NOT NULL THEN NPI END) as npi_list
                 FROM matched_visits
                 GROUP BY ENROLID, SVCDATE
                 ORDER BY ENROLID, SVCDATE
@@ -199,97 +129,43 @@ def process_full_year_with_saves(year):
                 chunk_result = conn.execute(chunk_query).fetchdf()
                 
                 if not chunk_result.empty:
-                    current_batch_results.append(chunk_result)
+                    all_results.append(chunk_result)
 
-                # DELETE current chunk's ENROLIDs from BOTH temp tables
-                print(f"    Deleting chunk ENROLIDs from cached data...")
-                delete_start = time.time()
-                
-                conn.execute(f"""
-                    DELETE FROM remaining_prescriptions 
-                    WHERE ENROLID IN ('{enrolid_list}')
-                """)
-                
-                conn.execute(f"""
-                    DELETE FROM remaining_outpatient 
-                    WHERE ENROLID IN ('{enrolid_list}')
-                """)
-                
-                delete_time = time.time() - delete_start
                 chunk_time = time.time() - chunk_start
-                
-                print(f"    Results: {len(chunk_result):,} prescription events")
-                print(f"    Deletion: {delete_time:.1f}s, Total chunk: {chunk_time:.1f}s")
+                print(f"    {chunk_name}: {len(chunk_result):,} prescription events in {chunk_time:.1f}s")
 
-                # Clean up chunk data
+                # Clean up chunk data (aggressive cleanup)
                 del chunk_result, chunk_enrolids
-
-                # Save intermediate results every SAVE_EVERY chunks
-                if (chunk_idx + 1) % SAVE_EVERY == 0 or (chunk_idx + 1) == len(chunks):
-                    batch_number += 1
-                    batch_start_chunk = max(0, chunk_idx + 1 - SAVE_EVERY)
-                    batch_end_chunk = chunk_idx + 1
-                    
-                    print(f"    💾 Saving batch {batch_number} (chunks {batch_start_chunk + 1}-{batch_end_chunk})...")
-                    
-                    if current_batch_results:
-                        batch_df = pd.concat(current_batch_results, ignore_index=True)
-                        batch_file = f'chunks_batch_{batch_number:03d}.parquet'
-                        batch_df.to_parquet(batch_file, compression='snappy')
-                        
-                        print(f"       Saved {len(batch_df):,} prescription events to {batch_file}")
-                        
-                        # Clear batch data and force cleanup
-                        del batch_df, current_batch_results
-                        current_batch_results = []
-                        gc.collect()
+                
+                # More frequent garbage collection for aggressive memory management
+                if (chunk_idx + 1) % 5 == 0:
+                    gc.collect()
+                    print(f"    Memory cleanup performed after chunk {chunk_idx + 1}")
 
             except Exception as e:
-                print(f"    ERROR in chunk {chunk_idx + 1}: {e}")
+                print(f"    ERROR in {chunk_name}: {e}")
                 continue
 
-        # Step 4: Load and combine all intermediate files
-        print(f"\nStep 3: Loading and combining intermediate batch files...")
+        # Step 3: Combine all results for this year
+        print(f"\nStep 3: Combining {len(all_results)} chunks for year {year}...")
         
-        intermediate_files = sorted(glob.glob(f'chunks_batch_*.parquet'))
-        print(f"  Found {len(intermediate_files)} batch files to combine")
-        
-        if not intermediate_files:
-            print("ERROR: No intermediate files found!")
+        if not all_results:
+            print(f"ERROR: No successful chunks for year {year}!")
             return None
 
-        # Load and combine all batch files
-        all_batch_dfs = []
-        total_events = 0
-        
-        for i, batch_file in enumerate(intermediate_files):
-            print(f"  Loading {batch_file}...")
-            batch_df = pd.read_parquet(batch_file)
-            all_batch_dfs.append(batch_df)
-            total_events += len(batch_df)
-            print(f"    Loaded {len(batch_df):,} prescription events")
+        final_df = pd.concat(all_results, ignore_index=True)
+        print(f"  Year {year} final dataset: {len(final_df):,} prescription events with provider matches")
 
-        final_df = pd.concat(all_batch_dfs, ignore_index=True)
-        print(f"  Combined total: {len(final_df):,} prescription events")
-        print(f"  Columns: {list(final_df.columns)}")
-
-        # Clean up intermediate files and data
-        del all_batch_dfs
+        del all_results
         gc.collect()
-        
-        # Clean up intermediate files (they're no longer needed)
-        print(f"  Cleaning up {len(intermediate_files)} intermediate files...")
-        for batch_file in intermediate_files:
-            os.remove(batch_file)
-        print(f"  All intermediate files deleted")
 
-        # Step 4: Create histogram
-        print("\nStep 4: Creating histogram...")
+        # Step 4: Create histogram for this year
+        print(f"\nStep 4: Creating histogram for year {year}...")
         histogram_data = final_df['unique_npi_count'].value_counts().sort_index()
         total_events = len(final_df)
         
-        print(f"\nHistogram of Unique NPI Counts:")
-        print("=" * 50)
+        print(f"\nHistogram of Unique NPI Counts per Prescription Event - Year {year}:")
+        print("=" * 60)
         for npi_count, frequency in histogram_data.items():
             percentage = (frequency / total_events) * 100
             print(f"  {npi_count:2d} NPI(s): {frequency:6,} events ({percentage:5.1f}%)")
@@ -314,23 +190,24 @@ def process_full_year_with_saves(year):
         print(f"\nHistogram saved as: {histogram_file}")
 
         # Step 5: Single NPI subset
-        print("\nStep 5: Single NPI subset...")
+        print(f"\nStep 5: Single NPI subset for year {year}...")
         single_npi_df = final_df[final_df['unique_npi_count'] == 1].copy()
         
-        print(f"  Single NPI cases: {len(single_npi_df):,} ({len(single_npi_df)/len(final_df)*100:.1f}%)")
+        print(f"  Year {year} - Single NPI cases: {len(single_npi_df):,} ({len(single_npi_df)/len(final_df)*100:.1f}%)")
 
-        # Step 6: Save results
-        print("\nStep 6: Saving results...")
+        # Clean up single NPI data
+        single_npi_clean = single_npi_df[['ENROLID', 'prescription_date', 'total_visits']].copy()
+        single_npi_clean['NPI'] = single_npi_df['npi_list'].apply(lambda x: x[0] if x else None)
+
+        # Step 6: Save files for this year
+        print(f"\nStep 6: Saving results for year {year}...")
         
-        # Save full dataset (only 3 columns)
-        merged_file = f'prescription_npi_counts_{year}.parquet'
+        merged_file = f'merged_prescriptions_providers_{year}.parquet'
         final_df.to_parquet(merged_file, compression='snappy')
         
-        # Save single NPI subset (only 3 columns)
         single_npi_file = f'single_npi_prescriptions_{year}.parquet'
-        single_npi_df.to_parquet(single_npi_file, compression='snappy')
+        single_npi_clean.to_parquet(single_npi_file, compression='snappy')
         
-        # Save histogram data
         histogram_df = pd.DataFrame({
             'unique_npi_count': histogram_data.index,
             'frequency': histogram_data.values,
@@ -339,20 +216,31 @@ def process_full_year_with_saves(year):
         histogram_data_file = f'npi_histogram_data_{year}.csv'
         histogram_df.to_csv(histogram_data_file, index=False)
 
-        total_time = time.time() - total_start_time
+        year_time = time.time() - year_start_time
         
         print(f"\n{'='*60}")
-        print(f"BATCH PROCESSING COMPLETE - {total_time/60:.1f} minutes")
+        print(f"YEAR {year} COMPLETE - {year_time/60:.1f} minutes")
         print(f"{'='*60}")
-        print(f"Processed: {total_patients:,} patients in {len(chunks)} chunks")
+        print(f"Processed: {total_patients:,} patients")
         print(f"Results: {len(final_df):,} prescription events")
-        print(f"Files: {merged_file}, {single_npi_file}, {histogram_data_file}")
+        print(f"Files created:")
+        print(f"  - {merged_file}")
+        print(f"  - {single_npi_file}")
+        print(f"  - {histogram_data_file}")
+        print(f"  - {histogram_file}")
         print(f"{'='*60}")
 
-        return final_df
+        return {
+            'year': year,
+            'merged_data': final_df,
+            'single_npi_data': single_npi_clean,
+            'histogram_data': histogram_df,
+            'total_patients': total_patients,
+            'total_events': len(final_df)
+        }
 
     except Exception as e:
-        print(f"ERROR: {e}")
+        print(f"ERROR in year {year}: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -364,16 +252,87 @@ def process_full_year_with_saves(year):
             pass
         gc.collect()
 
+def create_multi_year_summary(yearly_results):
+    """Create a summary across all years"""
+    print(f"\n{'='*60}")
+    print("MULTI-YEAR SUMMARY")
+    print(f"{'='*60}")
+    
+    summary_data = []
+    total_patients_all = 0
+    total_events_all = 0
+    
+    for result in yearly_results:
+        if result:
+            year = result['year']
+            patients = result['total_patients']
+            events = result['total_events']
+            
+            summary_data.append({
+                'year': year,
+                'total_patients': patients,
+                'total_events': events
+            })
+            
+            total_patients_all += patients
+            total_events_all += events
+            
+            print(f"Year {year}: {patients:,} patients, {events:,} events")
+    
+    print(f"\nGRAND TOTAL: {total_patients_all:,} patients, {total_events_all:,} events")
+    
+    # Save multi-year summary
+    summary_df = pd.DataFrame(summary_data)
+    summary_file = f'multi_year_summary_{START_YEAR}_{END_YEAR}.csv'
+    summary_df.to_csv(summary_file, index=False)
+    print(f"Summary saved as: {summary_file}")
+    
+    return summary_df
+
 def main():
-    print("MarketScan Analysis - BATCH PROCESSING WITH SAVES")
-    print("=" * 60)
+    print("MarketScan Analysis - MULTI-YEAR DATASET")
+    print("=" * 50)
+    print(f"Processing years: {START_YEAR} to {END_YEAR}")
+    print(f"Chunk size: {CHUNK_SIZE:,} patients per chunk")
     
-    result = process_full_year_with_saves(2018)
+    overall_start_time = time.time()
+    yearly_results = []
     
-    if result is not None:
-        print("\n🎉 Batch processing completed!")
+    # Process each year
+    for year in range(START_YEAR, END_YEAR + 1):
+        result = process_single_year(year)
+        yearly_results.append(result)
+        
+        # Clean up between years
+        gc.collect()
+        
+        if result is None:
+            print(f"⚠️  Year {year} processing failed, continuing with next year...")
+        else:
+            print(f"✅ Year {year} completed successfully")
+    
+    # Create multi-year summary
+    successful_years = [r for r in yearly_results if r is not None]
+    
+    if successful_years:
+        create_multi_year_summary(successful_years)
+        
+        total_time = time.time() - overall_start_time
+        
+        print(f"\n{'='*60}")
+        print("🎉 MULTI-YEAR PROCESSING COMPLETE!")
+        print(f"{'='*60}")
+        print(f"Total processing time: {total_time/60:.1f} minutes")
+        print(f"Successfully processed: {len(successful_years)}/{END_YEAR - START_YEAR + 1} years")
+        print(f"Failed years: {len(yearly_results) - len(successful_years)}")
+        
+        if len(successful_years) < len(yearly_results):
+            failed_years = [START_YEAR + i for i, r in enumerate(yearly_results) if r is None]
+            print(f"Failed year(s): {failed_years}")
+        
+        print(f"{'='*60}")
     else:
-        print("\n❌ Processing failed")
+        print("\n❌ All years failed to process")
 
 if __name__ == "__main__":
     main()
