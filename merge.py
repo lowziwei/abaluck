@@ -97,7 +97,7 @@ def process_full_year_with_saves(year):
         print(f"\nStep 3: Processing {len(chunks)} chunks with progressive deletion...")
         
         # Clean up any existing intermediate files
-        intermediate_files = glob.glob(f'chunks_batch_*.parquet')
+        intermediate_files = glob.glob(f'chunks_{year}_batch_*.parquet')
         for f in intermediate_files:
             os.remove(f)
             
@@ -220,7 +220,7 @@ def process_full_year_with_saves(year):
         # Step 4: Load and combine all intermediate files
         print(f"\nStep 3: Loading and combining intermediate batch files...")
         
-        intermediate_files = sorted(glob.glob(f'chunks_batch_*.parquet'))
+        intermediate_files = sorted(glob.glob(f'chunks_{year}_batch_*.parquet'))
         print(f"  Found {len(intermediate_files)} batch files to combine")
         
         if not intermediate_files:
@@ -247,10 +247,10 @@ def process_full_year_with_saves(year):
         gc.collect()
         
         # Clean up intermediate files (they're no longer needed)
-        print(f"  Cleaning up {len(intermediate_files)} intermediate files...")
-        for batch_file in intermediate_files:
-            os.remove(batch_file)
-        print(f"  All intermediate files deleted")
+        #print(f"  Cleaning up {len(intermediate_files)} intermediate files...")
+        #for batch_file in intermediate_files:
+            #os.remove(batch_file)
+        #print(f"  All intermediate files deleted")
 
         # Step 4: Create histogram
         print("\nStep 4: Creating histogram...")
