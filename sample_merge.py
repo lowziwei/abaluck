@@ -14,7 +14,7 @@ TEST_CHUNK_SIZE = 200000  # First 200k patients
 
 def test_first_chunk_null_fix(year):
     print(f"\n{'='*60}")
-    print(f"FIRST CHUNK TEST - 200k PATIENTS (NULL NPI FIX)")
+    print(f"FIRST CHUNK TEST - 200k PATIENTS (LEFT JOIN VERSION)")
     print(f"{'='*60}")
 
     # File paths
@@ -52,8 +52,8 @@ def test_first_chunk_null_fix(year):
         
         print(f"  Selected {len(test_enrolids):,} patients in {step1_time:.2f} seconds")
 
-        # Step 2: Process this chunk with NULL NPI fix
-        print(f"\nStep 2: Processing chunk with NULL NPI handling...")
+        # Step 2: Process this chunk with LEFT JOIN
+        print(f"\nStep 2: Processing chunk with LEFT JOIN...")
         step2_start = time.time()
         
         enrolid_list = "', '".join(map(str, test_enrolids))
@@ -87,15 +87,15 @@ def test_first_chunk_null_fix(year):
               AND SVCDATE IS NOT NULL 
               AND ENROLID IN ('{enrolid_list}')
         ),
-        -- Step 3: Merge with +/- 3 day SVCDATE band
+        -- Step 3: Merge with +/- 3 day SVCDATE band using LEFT JOIN
         matched_visits AS (
             SELECT 
                 p.ENROLID,
-                p.SVCDATE,
+                p.SVCDATE as prescription_date,
                 o.SVCDATE as physician_date,
                 o.NPI
             FROM unique_chunk_prescriptions p
-            INNER JOIN chunk_outpatient o 
+            LEFT JOIN chunk_outpatient o 
                 ON p.ENROLID = o.ENROLID 
                 AND o.SVCDATE BETWEEN (p.SVCDATE - INTERVAL 3 DAY) 
                                   AND (p.SVCDATE + INTERVAL 3 DAY)
@@ -103,14 +103,14 @@ def test_first_chunk_null_fix(year):
         -- Step 4: Collapse counting only non-NULL NPIs
         SELECT 
             ENROLID,
-            SVCDATE as prescription_date,
+            prescription_date as SVCDATE,
             COUNT(DISTINCT CASE WHEN NPI IS NOT NULL THEN NPI END) as unique_npi_count,
             COUNT(*) as total_visits,
             COUNT(CASE WHEN NPI IS NULL THEN 1 END) as null_npi_visits,
             ARRAY_AGG(DISTINCT CASE WHEN NPI IS NOT NULL THEN NPI END) as npi_list
         FROM matched_visits
-        GROUP BY ENROLID, SVCDATE
-        ORDER BY ENROLID, SVCDATE
+        GROUP BY ENROLID, prescription_date
+        ORDER BY ENROLID, prescription_date
         """
 
         final_df = conn.execute(chunk_query).fetchdf()
@@ -124,7 +124,9 @@ def test_first_chunk_null_fix(year):
         if len(final_df) > 0:
             # NULL NPI analysis
             events_with_nulls = (final_df['null_npi_visits'] > 0).sum()
+            zero_npi_events = (final_df['unique_npi_count'] == 0).sum()
             print(f"  Prescription events with NULL NPI visits: {events_with_nulls:,} ({events_with_nulls/len(final_df)*100:.1f}%)")
+            print(f"  Prescription events with 0 unique NPIs: {zero_npi_events:,} ({zero_npi_events/len(final_df)*100:.1f}%)")
             
             # Events per patient
             events_per_patient = len(final_df) / len(test_enrolids)
@@ -134,7 +136,7 @@ def test_first_chunk_null_fix(year):
             histogram_data = final_df['unique_npi_count'].value_counts().sort_index()
             total_events = len(final_df)
             
-            print(f"\nHistogram (first {TEST_CHUNK_SIZE:,} patients):")
+            print(f"\nHistogram (first {TEST_CHUNK_SIZE:,} patients, LEFT JOIN):")
             print("=" * 50)
             for npi_count, frequency in histogram_data.items():
                 percentage = (frequency / total_events) * 100
@@ -153,7 +155,7 @@ def test_first_chunk_null_fix(year):
         total_time = time.time() - total_start_time
         
         print(f"\n{'='*60}")
-        print(f"FIRST CHUNK TEST COMPLETE - {total_time:.1f} seconds")
+        print(f"FIRST CHUNK TEST COMPLETE (LEFT JOIN) - {total_time:.1f} seconds")
         print(f"{'='*60}")
         print(f"Patients processed: {len(test_enrolids):,}")
         print(f"Prescription events: {len(final_df):,}")
@@ -161,7 +163,7 @@ def test_first_chunk_null_fix(year):
         
         if len(final_df) > 0:
             print(f"Events per patient: {len(final_df)/len(test_enrolids):.2f}")
-            print(f"NULL NPI fix working: {events_with_nulls:,} events kept that would have been lost")
+            print(f"Events with no matching outpatient visits: {zero_npi_events:,}")
         
         print(f"{'='*60}")
 
@@ -170,7 +172,8 @@ def test_first_chunk_null_fix(year):
             'prescription_events': len(final_df),
             'total_time': total_time,
             'events_per_patient': len(final_df)/len(test_enrolids),
-            'null_npi_events': events_with_nulls if len(final_df) > 0 else 0
+            'null_npi_events': events_with_nulls if len(final_df) > 0 else 0,
+            'zero_npi_events': zero_npi_events if len(final_df) > 0 else 0
         }
 
     except Exception as e:
@@ -188,7 +191,7 @@ def test_first_chunk_null_fix(year):
 
 def main():
     print("MarketScan Analysis - FIRST CHUNK TEST")
-    print("Testing NULL NPI fix on first 200k patients")
+    print("Testing NULL NPI fix on first 200k patients with LEFT JOIN")
     print("=" * 50)
     
     result = test_first_chunk_null_fix(2018)
@@ -197,6 +200,7 @@ def main():
         print(f"\n🎉 First chunk test completed!")
         print(f"Events per patient: {result['events_per_patient']:.2f}")
         print(f"NULL NPI events preserved: {result['null_npi_events']:,}")
+        print(f"Zero NPI events (no matching outpatient): {result['zero_npi_events']:,}")
         print("Ready to run full dataset if numbers look good!")
     else:
         print("\n❌ Test failed")
