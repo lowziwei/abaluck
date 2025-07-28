@@ -105,8 +105,8 @@ def test_first_200k_patients(year):
             FROM unique_chunk_prescriptions p
             LEFT JOIN chunk_outpatient o 
                 ON p.ENROLID = o.ENROLID 
-                AND o.SVCDATE BETWEEN (p.SVCDATE - INTERVAL 3 DAY) 
-                                  AND (p.SVCDATE + INTERVAL 3 DAY)
+                AND o.SVCDATE BETWEEN (p.SVCDATE - INTERVAL 5 DAY) 
+                                  AND (p.SVCDATE + INTERVAL 5 DAY)
         )
         -- Count unique NPIs per prescription
         SELECT 
