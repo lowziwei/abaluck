@@ -1,247 +1,186 @@
 import duckdb
 import pandas as pd
-from pathlib import Path
 
-def create_prescription_flags_duckdb(dataset_type="COMMERCIAL_SET_A", database="CCAE", 
-                                   table_code="D", start_year=2018, end_year=2024):
+def create_2018_prescription_flags(dataset_type="COMMERCIAL_SET_A", database="CCAE", table_code="D"):
     """
-    Create FLAG column for prescriptions with REFILL = 0, indicating how many years back
-    the same ENROLID + NDCNUM combination was found.
+    Process 2018 data and check against previous years
     
-    Uses DuckDB for efficient processing of large parquet files.
-    
-    Parameters:
-    dataset_type: str, dataset identifier
-    database: str, database identifier  
-    table_code: str, table code (D for prescriptions)
-    start_year: int, starting year for analysis (default 2018)
-    end_year: int, ending year for analysis (default 2024)
-    
-    Returns:
-    pandas DataFrame with FLAG column added
+    Steps:
+    1. Load 2018 file with only necessary columns
+    2. Filter for REFILL = 0
+    3. Create FLAG column by checking previous years for same ENROLID + NDCNUM
     """
     
     conn = duckdb.connect()
     
-    # Build list of available files
-    data_path = Path(f"/data/MarketScan_data/{dataset_type}")
-    available_files = []
+    # File paths
+    data_path = f"/data/MarketScan_data/{dataset_type}"
+    file_2018 = f"{data_path}/{database}_{table_code}_2018.parquet"
     
-    for year in range(2014, end_year + 1):  # Check from 2014 to have lookback data
-        file_path = data_path / f"{database}_{table_code}_{year}.parquet"
-        if file_path.exists():
-            available_files.append((year, str(file_path)))
-            print(f"Found file for year {year}")
+    # Check which previous year files exist
+    previous_years = []
+    for year in [2017, 2016, 2015, 2014]:
+        file_path = f"{data_path}/{database}_{table_code}_{year}.parquet"
+        try:
+            # Test if file exists and is readable
+            conn.execute(f"SELECT COUNT(*) FROM '{file_path}' LIMIT 1")
+            previous_years.append(year)
+            print(f"Found data for year {year}")
+        except:
+            print(f"No data found for year {year}")
     
-    if not available_files:
-        raise FileNotFoundError("No prescription files found")
+    if not previous_years:
+        print("No previous year data found!")
+        return pd.DataFrame()
     
-    # Create a temporary table with all years of data - only necessary columns
-    print("Loading prescription data (ENROLID, NDCNUM, REFILL, YEAR only)...")
+    print(f"Will check against years: {previous_years}")
     
-    # First, create the combined dataset with only necessary columns
-    union_queries = []
-    for year, file_path in available_files:
-        union_queries.append(f"SELECT ENROLID, NDCNUM, REFILL, YEAR FROM '{file_path}'")
+    # Step 1: Load 2018 data with only necessary columns and filter for REFILL = 0
+    print("Loading 2018 REFILL=0 prescriptions...")
     
-    combined_query = " UNION ALL ".join(union_queries)
-    
-    # Create temporary view
-    conn.execute(f"""
-        CREATE OR REPLACE TEMP VIEW all_prescriptions AS (
-            {combined_query}
-        )
-    """)
-    
-    print("Data loaded. Creating flags...")
-    
-    # Get the flagged results using SQL - using exact column names from your data
-    flag_query = f"""
-    WITH refill_zero AS (
-        -- Get all REFILL = 0 prescriptions from {start_year} onwards
-        SELECT *
-        FROM all_prescriptions 
-        WHERE REFILL = 0 AND YEAR >= {start_year}
-    ),
-    
-    enrol_ndc_years AS (
-        -- Create lookup of all ENROLID + NDCNUM combinations with their years
-        SELECT ENROLID, NDCNUM, ARRAY_AGG(DISTINCT YEAR ORDER BY YEAR) as available_years
-        FROM all_prescriptions
-        GROUP BY ENROLID, NDCNUM
-    ),
-    
-    flagged_prescriptions AS (
-        SELECT r.*,
-               CASE 
-                   -- Check if previous year exists (t-1)
-                   WHEN list_contains(e.available_years, r.YEAR - 1) THEN -1
-                   -- Check if 2 years back exists (t-2) 
-                   WHEN list_contains(e.available_years, r.YEAR - 2) THEN -2
-                   -- Check if 3 years back exists (t-3)
-                   WHEN list_contains(e.available_years, r.YEAR - 3) THEN -3
-                   -- Check if 4 years back exists (t-4)
-                   WHEN list_contains(e.available_years, r.YEAR - 4) THEN -4
-                   -- Check if 5 years back exists (t-5)
-                   WHEN list_contains(e.available_years, r.YEAR - 5) THEN -5
-                   -- Check if 6 years back exists (t-6)
-                   WHEN list_contains(e.available_years, r.YEAR - 6) THEN -6
-                   -- Check if 7 years back exists (t-7)
-                   WHEN list_contains(e.available_years, r.YEAR - 7) THEN -7
-                   -- Check if 8 years back exists (t-8)
-                   WHEN list_contains(e.available_years, r.YEAR - 8) THEN -8
-                   -- Check if 9 years back exists (t-9)
-                   WHEN list_contains(e.available_years, r.YEAR - 9) THEN -9
-                   -- Check if 10 years back exists (t-10)
-                   WHEN list_contains(e.available_years, r.YEAR - 10) THEN -10
-                   ELSE NULL
-               END as FLAG
-        FROM refill_zero r
-        LEFT JOIN enrol_ndc_years e ON r.ENROLID = e.ENROLID AND r.NDCNUM = e.NDCNUM
-    )
-    
-    SELECT * FROM flagged_prescriptions
-    WHERE FLAG IS NOT NULL  -- Only return rows that have a flag
-    ORDER BY ENROLID, NDCNUM, YEAR
+    refill_2018_query = f"""
+    SELECT ENROLID, NDCNUM, REFILL, YEAR, SVCDATE
+    FROM '{file_2018}'
+    WHERE REFILL = 0
     """
     
-    # Execute and return results
+    df_2018_refill0 = conn.execute(refill_2018_query).df()
+    print(f"Found {len(df_2018_refill0):,} prescriptions with REFILL=0 in 2018")
+    
+    if len(df_2018_refill0) == 0:
+        print("No REFILL=0 prescriptions found in 2018")
+        return pd.DataFrame()
+    
+    # Step 2: Create the FLAG column by checking previous years
+    print("Checking previous years for same ENROLID + NDCNUM combinations...")
+    
+    # Build the SQL query to check previous years AND same year
+    case_conditions = []
+    
+    # First check within same year (2018) - only flag if REFILL=0 is NOT the first chronological instance
+    case_conditions.append(f"""
+        WHEN EXISTS (
+            SELECT 1 FROM '{file_2018}' same_year
+            WHERE same_year.ENROLID = r.ENROLID 
+            AND same_year.NDCNUM = r.NDCNUM
+            AND same_year.SVCDATE < r.SVCDATE
+        ) THEN 0
+    """)
+    
+    # Then check previous years
+    for i, year in enumerate(sorted(previous_years, reverse=True)):  # Start with most recent year
+        years_back = 2018 - year
+        file_path = f"{data_path}/{database}_{table_code}_{year}.parquet"
+        
+        case_conditions.append(f"""
+            WHEN EXISTS (
+                SELECT 1 FROM '{file_path}' p{year}
+                WHERE p{year}.ENROLID = r.ENROLID 
+                AND p{year}.NDCNUM = r.NDCNUM
+            ) THEN -{years_back}
+        """)
+    
+    # Create the full query with FLAG column
+    flag_query = f"""
+    WITH refill_zero_2018 AS (
+        SELECT ENROLID, NDCNUM, REFILL, YEAR, SVCDATE
+        FROM '{file_2018}'
+        WHERE REFILL = 0
+    )
+    SELECT r.*,
+           CASE 
+               {''.join(case_conditions)}
+               ELSE NULL
+           END as FLAG
+    FROM refill_zero_2018 r
+    """
+    
+    print("Executing flag assignment query...")
     result_df = conn.execute(flag_query).df()
     
-    print(f"Analysis complete. Found {len(result_df):,} prescriptions with flags.")
-    print(f"Flag distribution:")
-    print(result_df['FLAG'].value_counts().sort_index())
+    # Show results
+    flagged_count = result_df['FLAG'].notna().sum()
+    coding_error_count = (result_df['FLAG'] == 0).sum()
+    previous_year_count = flagged_count - coding_error_count
+    
+    print(f"\nResults:")
+    print(f"Total REFILL=0 prescriptions in 2018: {len(result_df):,}")
+    print(f"Potential coding errors (FLAG=0, REFILL=0 but NOT the first chronological instance): {coding_error_count:,}")
+    print(f"Prescriptions with previous year patterns: {previous_year_count:,}")
+    print(f"Total flagged: {flagged_count:,}")
+    print(f"Percentage with any pattern: {flagged_count/len(result_df)*100:.1f}%")
+    
+    if flagged_count > 0:
+        print(f"\nFlag distribution:")
+        flag_counts = result_df['FLAG'].value_counts().sort_index()
+        for flag, count in flag_counts.items():
+            if flag == 0:
+                print(f"  FLAG  0 (not first chronological instance): {count:6,} prescriptions ({count/flagged_count*100:.1f}%)")
+            else:
+                years_back = abs(int(flag))
+                check_year = 2018 - years_back
+                print(f"  FLAG {int(flag):2d} (found in {check_year}): {count:6,} prescriptions ({count/flagged_count*100:.1f}%)")
+    
+    # Show sample
+    print(f"\nSample of results:")
+    print(result_df[['ENROLID', 'NDCNUM', 'YEAR', 'REFILL', 'FLAG']].head(10))
     
     return result_df
 
-def analyze_prescription_patterns(dataset_type="COMMERCIAL_SET_A", database="CCAE", 
-                                table_code="D", start_year=2018):
+def quick_analysis_2018():
     """
-    Comprehensive analysis of prescription patterns with flags
-    """
-    
-    # Get flagged prescriptions
-    flagged_df = create_prescription_flags_duckdb(dataset_type, database, table_code, start_year)
-    
-    print("\n" + "="*60)
-    print("PRESCRIPTION PATTERN ANALYSIS")
-    print("="*60)
-    
-    # Summary statistics
-    print(f"\nTotal flagged prescriptions: {len(flagged_df):,}")
-    print(f"Unique patients (ENROLID): {flagged_df['ENROLID'].nunique():,}")
-    print(f"Unique drugs (NDCNUM): {flagged_df['NDCNUM'].nunique():,}")
-    
-    # Flag distribution
-    print(f"\nFlag Distribution (years back):")
-    flag_counts = flagged_df['FLAG'].value_counts().sort_index()
-    for flag, count in flag_counts.items():
-        print(f"  {flag:2d} year(s) back: {count:6,} prescriptions ({count/len(flagged_df)*100:.1f}%)")
-    
-    # Year distribution
-    print(f"\nPrescriptions by Year:")
-    year_counts = flagged_df['YEAR'].value_counts().sort_index()
-    for year, count in year_counts.items():
-        print(f"  {year}: {count:6,} prescriptions")
-    
-    # Top drugs with patterns
-    print(f"\nTop 10 Drugs with Most Pattern Matches:")
-    drug_patterns = flagged_df.groupby('NDCNUM').agg({
-        'FLAG': 'count',
-        'ENROLID': 'nunique'
-    }).rename(columns={'FLAG': 'total_patterns', 'ENROLID': 'unique_patients'})
-    drug_patterns = drug_patterns.sort_values('total_patterns', ascending=False).head(10)
-    
-    for ndcnum, row in drug_patterns.iterrows():
-        print(f"  {ndcnum}: {row['total_patterns']:,} patterns, {row['unique_patients']:,} patients")
-    
-    return flagged_df
-
-# Example usage for your current setup
-def run_analysis():
-    """
-    Run the analysis with your current configuration
+    Quick analysis of 2018 prescription flags
     """
     
-    # Your current settings
     DATASET_TYPE = "COMMERCIAL_SET_A"
     DATABASE = "CCAE" 
     TABLE_CODE = "D"
     
-    print("Starting prescription pattern analysis...")
+    print("="*60)
+    print("2018 PRESCRIPTION FLAG ANALYSIS")
+    print("="*60)
     print(f"Dataset: {DATASET_TYPE}")
     print(f"Database: {DATABASE}")
     print(f"Table: {TABLE_CODE}")
+    print()
     
     try:
         # Run the analysis
-        results = analyze_prescription_patterns(DATASET_TYPE, DATABASE, TABLE_CODE, 2018)
+        results = create_2018_prescription_flags(DATASET_TYPE, DATABASE, TABLE_CODE)
         
-        # Show sample of results
-        print(f"\nSample of flagged prescriptions:")
-        print(results[['ENROLID', 'NDCNUM', 'YEAR', 'REFILL', 'FLAG']].head(10))
-        
-        # Save results if needed
-        output_file = f"prescription_flags_{DATABASE}_{TABLE_CODE}_2018plus.parquet"
-        results.to_parquet(output_file)
-        print(f"\nResults saved to: {output_file}")
+        if len(results) > 0:
+            # Save results
+            output_file = f"prescription_flags_2018_{DATABASE}_{TABLE_CODE}.parquet"
+            results.to_parquet(output_file)
+            print(f"\nResults saved to: {output_file}")
+            
+            # Additional analysis
+            print(f"\nAdditional Analysis:")
+            print(f"Unique patients with flagged prescriptions: {results[results['FLAG'].notna()]['ENROLID'].nunique():,}")
+            print(f"Unique drugs with flagged prescriptions: {results[results['FLAG'].notna()]['NDCNUM'].nunique():,}")
+            
+            # Show coding errors specifically
+            coding_errors = results[results['FLAG'] == 0]
+            if len(coding_errors) > 0:
+                print(f"\nCoding Error Analysis (FLAG=0):")
+                print(f"Patients with potential coding errors: {coding_errors['ENROLID'].nunique():,}")
+                print(f"Drugs with potential coding errors: {coding_errors['NDCNUM'].nunique():,}")
+            
+            # Show most common drug patterns (excluding coding errors)
+            previous_patterns = results[results['FLAG'] < 0]
+            if len(previous_patterns) > 0:
+                print(f"\nTop 10 drugs with most previous year pattern matches:")
+                drug_patterns = previous_patterns.groupby('NDCNUM').size().sort_values(ascending=False).head(10)
+                for ndcnum, count in drug_patterns.items():
+                    print(f"  {ndcnum}: {count:,} pattern matches")
         
         return results
         
     except Exception as e:
         print(f"Error during analysis: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
-# Quick test with single year
-def test_single_year():
-    """
-    Test the logic with just 2018 data to verify it works
-    """
-    
-    conn = duckdb.connect()
-    
-    DATASET_TYPE = "COMMERCIAL_SET_A"
-    DATABASE = "CCAE"
-    TABLE_CODE = "D"
-    
-    # Load 2017 and 2018 data for testing - only necessary columns
-    file_2017 = f"/data/MarketScan_data/{DATASET_TYPE}/{DATABASE}_{TABLE_CODE}_2017.parquet"
-    file_2018 = f"/data/MarketScan_data/{DATASET_TYPE}/{DATABASE}_{TABLE_CODE}_2018.parquet"
-    
-    test_query = f"""
-    WITH combined_data AS (
-        SELECT ENROLID, NDCNUM, REFILL, YEAR FROM '{file_2017}'
-        UNION ALL
-        SELECT ENROLID, NDCNUM, REFILL, YEAR FROM '{file_2018}'
-    ),
-    
-    refill_zero_2018 AS (
-        SELECT * FROM combined_data 
-        WHERE REFILL = 0 AND YEAR = 2018
-        LIMIT 1000  -- Test with just 1000 rows
-    ),
-    
-    flagged AS (
-        SELECT r.*,
-               CASE WHEN EXISTS (
-                   SELECT 1 FROM combined_data c2 
-                   WHERE c2.ENROLID = r.ENROLID 
-                   AND c2.NDCNUM = r.NDCNUM 
-                   AND c2.YEAR = 2017
-               ) THEN -1 
-               ELSE NULL END as FLAG
-        FROM refill_zero_2018 r
-    )
-    
-    SELECT * FROM flagged WHERE FLAG IS NOT NULL
-    """
-    
-    test_results = conn.execute(test_query).df()
-    print(f"Test results: {len(test_results)} rows with flags")
-    print(test_results[['ENROLID', 'NDCNUM', 'YEAR', 'REFILL', 'FLAG']].head())
-    
-    return test_results
-
 if __name__ == "__main__":
-    # Run the full analysis
-    results = run_analysis()
+    results = quick_analysis_2018()
