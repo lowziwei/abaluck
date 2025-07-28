@@ -9,8 +9,8 @@ import os
 from pathlib import Path
 
 # Configuration - BATCH PROCESSING WITH INTERMEDIATE SAVES
-START_YEAR = 2018
-END_YEAR = 2018
+START_YEAR = 2019
+END_YEAR = 2024
 DATASET_TYPE = "COMMERCIAL_SET_A"
 DATABASE = "CCAE"
 CHUNK_SIZE = 100000
@@ -291,12 +291,13 @@ def main():
     print("MarketScan Analysis - DIRECT READ PROCESSING")
     print("=" * 60)
     
-    result = process_full_year_with_saves(2018)
-    
-    if result is not None:
-        print("\n🎉 Direct read processing completed!")
-    else:
-        print("\n❌ Processing failed")
+    for year in range(START_YEAR, END_YEAR + 1):
+        result = process_full_year_with_saves(year)
+        
+        if result is not None:
+            print(f"\n🎉 Year {year} processing completed!")
+        else:
+            print(f"\n❌ Year {year} processing failed")
 
 if __name__ == "__main__":
     main()
