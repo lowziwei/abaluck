@@ -73,6 +73,7 @@ def test_first_200k_patients(year):
             WHERE ENROLID IN ('{enrolid_list}')
               AND ENROLID IS NOT NULL 
               AND SVCDATE IS NOT NULL
+              AND REFILL = 0
         ),
         -- Keep first row per ENROLID, SVCDATE
         chunk_prescriptions AS (
