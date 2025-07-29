@@ -174,7 +174,7 @@ def test_truly_new_prescriptions(year):
             UNION ALL
             SELECT ENROLID, SVCDATE, NPI, source_file FROM chunk_inpatient
         ),
-        -- Merge prescription with combined visits (±5 days)
+        -- Merge prescription with combined visits (±30 days)
         matched_visits AS (
             SELECT 
                 p.ENROLID,
@@ -185,8 +185,8 @@ def test_truly_new_prescriptions(year):
             FROM test_prescriptions p
             LEFT JOIN combined_visits c 
                 ON p.ENROLID = c.ENROLID 
-                AND c.SVCDATE BETWEEN (p.prescription_date::DATE - INTERVAL 5 DAY) 
-                                  AND (p.prescription_date::DATE + INTERVAL 5 DAY)
+                AND c.SVCDATE BETWEEN (p.prescription_date::DATE - INTERVAL 30 DAY) 
+                                  AND (p.prescription_date::DATE + INTERVAL 30 DAY)
         )
         -- Count unique NPIs per prescription, with source breakdown
         SELECT 
