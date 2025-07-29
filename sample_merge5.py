@@ -119,11 +119,21 @@ def test_truly_new_prescriptions(year):
         enrolid_list = "', '".join(map(str, test_patients))
 
         # Create temporary table with prescription data
+        print(f"  Creating temporary table with {len(test_prescriptions):,} prescriptions...")
+        
+        # Convert DataFrame to list of tuples for SQL
+        prescription_values = []
+        for _, row in test_prescriptions.iterrows():
+            enrolid = row['ENROLID']
+            svcdate = row['SVCDATE']
+            prescription_values.append(f"({enrolid}, '{svcdate}')")
+        
+        values_str = ', '.join(prescription_values)
+        
         conn.execute(f"""
             CREATE OR REPLACE TEMP TABLE test_prescriptions AS
-            SELECT ENROLID, SVCDATE as prescription_date
-            FROM (VALUES {', '.join([f"({row['ENROLID']}, '{row['SVCDATE']}')" for _, row in test_prescriptions.iterrows()])})
-            AS t(ENROLID, prescription_date)
+            SELECT ENROLID, prescription_date
+            FROM (VALUES {values_str}) AS t(ENROLID, prescription_date)
         """)
 
         # Process NPI matching
@@ -147,8 +157,8 @@ def test_truly_new_prescriptions(year):
             FROM test_prescriptions p
             LEFT JOIN chunk_outpatient o 
                 ON p.ENROLID = o.ENROLID 
-                AND o.SVCDATE BETWEEN (DATE(p.prescription_date) - INTERVAL 5 DAY) 
-                                  AND (DATE(p.prescription_date) + INTERVAL 5 DAY)
+                AND o.SVCDATE BETWEEN (DATE(p.prescription_date) - INTERVAL 30 DAY) 
+                                  AND (DATE(p.prescription_date) + INTERVAL 30 DAY)
         )
         -- Count unique NPIs per prescription
         SELECT 
