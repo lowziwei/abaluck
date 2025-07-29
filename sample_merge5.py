@@ -157,8 +157,8 @@ def test_truly_new_prescriptions(year):
             FROM test_prescriptions p
             LEFT JOIN chunk_outpatient o 
                 ON p.ENROLID = o.ENROLID 
-                AND o.SVCDATE BETWEEN (DATE(p.prescription_date) - INTERVAL 30 DAY) 
-                                  AND (DATE(p.prescription_date) + INTERVAL 30 DAY)
+                AND o.SVCDATE BETWEEN (p.prescription_date::DATE - INTERVAL 5 DAY) 
+                                  AND (p.prescription_date::DATE + INTERVAL 5 DAY)
         )
         -- Count unique NPIs per prescription
         SELECT 
