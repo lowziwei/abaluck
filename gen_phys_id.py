@@ -98,10 +98,10 @@ def process_patient_chunk(conn, file_path, file_type, year, chunk_patients, chun
         
         where_clause = "WHERE " + " AND ".join(exclusion_conditions)
         
-        # Get cleaned chunk data with PHYS_ID
+        # Get cleaned chunk data with PHYS_ID (with proper type casting)
         cleaned_query = f"""
         SELECT *,
-               COALESCE(NPI, PROVID) as PHYS_ID
+               COALESCE(CAST(NPI AS VARCHAR), CAST(PROVID AS VARCHAR)) as PHYS_ID
         FROM '{file_path}'
         {where_clause}
         """
@@ -285,8 +285,8 @@ def clean_provider_mappings_chunked(file_path, file_type, year=None):
             'records_with_provid': final_df['PROVID'].notna().sum(),
             'records_with_npi': final_df['NPI'].notna().sum(),
             'records_with_both': ((final_df['PROVID'].notna()) & (final_df['NPI'].notna())).sum(),
-            'phys_id_from_npi': (final_df['PHYS_ID'] == final_df['NPI']).sum(),
-            'phys_id_from_provid': ((final_df['PHYS_ID'] == final_df['PROVID']) & (final_df['NPI'].isna())).sum()
+            'phys_id_from_npi': (final_df['PHYS_ID'] == final_df['NPI'].astype(str)).sum(),
+            'phys_id_from_provid': ((final_df['PHYS_ID'] == final_df['PROVID'].astype(str)) & (final_df['NPI'].isna())).sum()
         }
         
         removal_rate = (total_stats['records_removed'] / total_stats['original_records']) * 100
