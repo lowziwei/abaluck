@@ -96,6 +96,73 @@ def save_histogram_data(year, chunk_num, final_df, output_dir):
     
     print(f"    💾 Saved histogram data: {filename}")
     return filepath, histogram_df
+
+def load_truly_new_prescriptions_optimized(year, test_patient_set=None):
+    """
+    OPTIMIZED: Load prescriptions using simple math - no peeking needed!
+    Each prescription chunk = 100k patients in ENROLID order
+    """
+    print(f"  Loading truly new prescriptions for {len(test_patient_set) if test_patient_set else 'all'} patients...")
+    
+    if test_patient_set is not None:
+        test_patient_set = set(test_patient_set)
+        max_test_enrolid = max(test_patient_set)
+        
+        # Simple math: each chunk = 100k patients
+        chunks_needed = (max_test_enrolid // 100000) + 1
+        print(f"    📊 Need first {chunks_needed} prescription chunks (100k patients each)")
+    else:
+        chunks_needed = 12  # Process all chunks
+        print(f"    📊 Processing all 12 prescription chunks")
+    
+    all_truly_new = []
+    total_records_checked = 0
+    
+    for i in range(1, min(chunks_needed + 1, 13)):  # chunks 01 to chunks_needed
+        file_path = f"prescription_flags_{year}_{DATABASE}_D_part{i:02d}.parquet"
+        
+        if not Path(file_path).exists():
+            print(f"    ⚠️  File not found: {file_path}")
+            continue
+        
+        try:
+            # Load chunk
+            df = pd.read_parquet(file_path)
+            total_records_checked += len(df)
+            
+            # Filter for truly new prescriptions (FLAG is NULL)
+            truly_new = df[df['FLAG'].isna()].copy()
+            
+            # Filter to test patients if specified
+            if test_patient_set:
+                truly_new = truly_new[truly_new['ENROLID'].isin(test_patient_set)]
+            
+            if len(truly_new) > 0:
+                # Keep only needed columns
+                truly_new_subset = truly_new[['ENROLID', 'SVCDATE']].copy()
+                all_truly_new.append(truly_new_subset)
+            
+        except Exception as e:
+            print(f"    💥 ERROR: {e}")
+        
+        # Clean up
+        if 'df' in locals():
+            del df
+        if 'truly_new' in locals():
+            del truly_new
+        gc.collect()
+    
+    if not all_truly_new:
+        print("    ❌ No truly new prescriptions found!")
+        return pd.DataFrame()
+    
+    # Combine results
+    combined_df = pd.concat(all_truly_new, ignore_index=True)
+    print(f"    ✅ Found {len(combined_df):,} truly new prescriptions")
+    
+    del all_truly_new
+    gc.collect()
+    return combined_df
     """
     OPTIMIZED: Load prescriptions using simple math - no peeking needed!
     Each prescription chunk = 100k patients in ENROLID order
