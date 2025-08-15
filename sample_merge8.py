@@ -53,22 +53,22 @@ def find_prescription_files(year):
     """
     print(f"  🔍 Looking for prescription flag files for year {year}...")
     
-    # Try different naming patterns
-    patterns = [
-        f"prescription_flags_{year}_{DATABASE}_D_part*.parquet",
-        f"prescription_flags_{DATABASE}_D_{year}_part*.parquet",
-        f"prescription_flags_{year}_part*.parquet"
-    ]
+    # Use the exact naming pattern you specified
+    pattern = f"prescription_flags_{year}_*_part*.parquet"
+    files = glob.glob(pattern)
     
-    for pattern in patterns:
-        files = glob.glob(pattern)
-        if files:
-            files = sorted(files)
-            print(f"  ✅ Found {len(files)} prescription files: {pattern}")
-            return files
-    
-    print(f"  ❌ No prescription flag files found for {year}")
-    return []
+    if files:
+        files = sorted(files)
+        print(f"  ✅ Found {len(files)} prescription files: {pattern}")
+        return files
+    else:
+        print(f"  ❌ No prescription flag files found for {year}")
+        print(f"     Pattern tried: {pattern}")
+        # Show what files actually exist
+        all_files = glob.glob("prescription_flags_*.parquet")
+        if all_files:
+            print(f"     Available prescription files: {[os.path.basename(f) for f in all_files[:5]]}...")
+        return []
 
 def load_prescription_chunk(file_path):
     """
@@ -123,16 +123,34 @@ def find_physician_files_for_patients(year, patients_set):
     """
     print(f"    🔍 Finding physician files containing {len(patients_set):,} patients...")
     
-    # Find all physician files for the year
-    pattern = f"clean_phys_id_batch_outpatient_{year}_*.parquet"
-    all_phys_files = glob.glob(pattern)
+    # Search in the processed_marketscan directory
+    phys_dir = "/home/zl749/processed_marketscan"
+    
+    # Find all physician files for the year - check both inpatient and outpatient
+    outpatient_pattern = f"{phys_dir}/clean_phys_id_batch_outpatient_{year}_*.parquet"
+    inpatient_pattern = f"{phys_dir}/clean_phys_id_batch_inpatient_{year}_*.parquet"
+    
+    all_phys_files = []
+    
+    # Check outpatient files
+    outpatient_files = glob.glob(outpatient_pattern)
+    if outpatient_files:
+        all_phys_files.extend(outpatient_files)
+        print(f"      Found {len(outpatient_files)} outpatient files")
+    
+    # Check inpatient files  
+    inpatient_files = glob.glob(inpatient_pattern)
+    if inpatient_files:
+        all_phys_files.extend(inpatient_files)
+        print(f"      Found {len(inpatient_files)} inpatient files")
     
     if not all_phys_files:
         print(f"      ❌ No physician files found for {year}")
+        print(f"         Tried patterns: {outpatient_pattern}, {inpatient_pattern}")
         return []
     
     all_phys_files = sorted(all_phys_files, key=lambda x: int(x.split('_')[-1].replace('.parquet', '')))
-    print(f"      Found {len(all_phys_files)} physician files to check")
+    print(f"      Total physician files to check: {len(all_phys_files)}")
     
     relevant_files = []
     
@@ -411,9 +429,63 @@ def process_year(year):
     
     return results
 
+def test_single_file():
+    """
+    Test with just one prescription file to make sure everything works
+    """
+    print("🧪 TESTING WITH SINGLE PRESCRIPTION FILE")
+    print("=" * 50)
+    
+    # Test parameters
+    test_year = 2018
+    test_part = "part01"  # You can change this to test different files
+    
+    # Use the exact naming pattern: prescription_flags_YYYY_*_part##.parquet
+    test_pattern = f"prescription_flags_{test_year}_*_{test_part}.parquet"
+    files = glob.glob(test_pattern)
+    
+    if files:
+        test_file = files[0]  # Take the first match
+        print(f"✅ Found test file: {test_file}")
+    else:
+        print(f"❌ Could not find test file for {test_year} {test_part}")
+        print(f"Pattern tried: {test_pattern}")
+        # List what prescription files actually exist
+        all_prescription_files = glob.glob("prescription_flags_*.parquet")
+        print(f"Available prescription files:")
+        for f in all_prescription_files[:10]:  # Show first 10
+            print(f"   {os.path.basename(f)}")
+        return
+    
+    # Process just this one file
+    print(f"\n🔬 Testing with: {os.path.basename(test_file)}")
+    
+    result = process_prescription_chunk(test_year, test_file)
+    
+    if result:
+        print(f"\n🎉 TEST SUCCESSFUL!")
+        print(f"   Output file: {result['output_file']}")
+        print(f"   Prescription events: {result['prescription_events']:,}")
+        print(f"   Processing time: {result['processing_time']:.1f}s")
+        print(f"   'Out of thin air': {result['out_of_thin_air']:,}")
+        
+        # Show the histogram file was created
+        output_path = os.path.join(OUTPUT_DIR, result['output_file'])
+        if Path(output_path).exists():
+            print(f"   ✅ Histogram file created: {Path(output_path).stat().st_size / 1024:.1f} KB")
+            
+            # Quick peek at the histogram data
+            histogram_df = pd.read_parquet(output_path)
+            print(f"   📊 Histogram preview:")
+            print(histogram_df.head())
+        else:
+            print(f"   ❌ Histogram file not found")
+    else:
+        print(f"\n❌ TEST FAILED - check errors above")
+
 def main():
     print("MarketScan Analysis - MULTI-YEAR PHYSICIAN ID ANALYSIS")
-    print("Processing in 100k chunks using existing prescription file structure")
+    print("Processing all prescription files for years 2018-2024")
     print("=" * 60)
     
     # Create output directory
