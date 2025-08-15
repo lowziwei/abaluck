@@ -322,8 +322,8 @@ def process_prescription_chunk(year, prescription_file):
             print(f"    ❌ No prescription events after matching")
             return None
         
-        # Step 5: Create and save histogram
-        print(f"    📊 Creating histogram...")
+        # Step 5: Create and save histogram + individual events
+        print(f"    📊 Creating histogram and saving individual events...")
         histogram_data = final_df['unique_phys_id_count'].value_counts().sort_index()
         total_events = len(final_df)
         
@@ -334,7 +334,7 @@ def process_prescription_chunk(year, prescription_file):
             'percentage': (histogram_data.values / total_events * 100).round(2)
         })
         
-        # Add metadata
+        # Add metadata to histogram
         histogram_df['year'] = year
         histogram_df['file_number'] = part_name
         histogram_df['total_events'] = total_events
@@ -346,11 +346,23 @@ def process_prescription_chunk(year, prescription_file):
         histogram_df['out_of_thin_air_events'] = out_of_thin_air
         histogram_df['zero_physician_events'] = zero_physicians
         
-        # Save histogram
+        # Prepare individual events data
+        events_df = final_df[['ENROLID', 'SVCDATE', 'unique_phys_id_count', 'actual_visits', 'visits_with_phys_id', 'visits_without_phys_id', 'out_of_thin_air']].copy()
+        events_df['year'] = year
+        events_df['file_number'] = part_name
+        
+        # Save both files
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-        output_file = f"unique_phys_{year}_{part_name}.parquet"
-        output_path = os.path.join(OUTPUT_DIR, output_file)
-        histogram_df.to_parquet(output_path, compression='snappy')
+        
+        # Save histogram
+        histogram_file = f"unique_phys_{year}_{part_name}.parquet"
+        histogram_path = os.path.join(OUTPUT_DIR, histogram_file)
+        histogram_df.to_parquet(histogram_path, compression='snappy')
+        
+        # Save individual events
+        events_file = f"prescription_events_{year}_{part_name}.parquet"
+        events_path = os.path.join(OUTPUT_DIR, events_file)
+        events_df.to_parquet(events_path, compression='snappy')
         
         chunk_time = time.time() - chunk_start_time
         
@@ -358,10 +370,11 @@ def process_prescription_chunk(year, prescription_file):
         print(f"       Prescription events: {total_events:,}")
         print(f"       Out of thin air: {out_of_thin_air:,} ({out_of_thin_air/total_events*100:.1f}%)")
         print(f"       Zero physicians: {zero_physicians:,} ({zero_physicians/total_events*100:.1f}%)")
-        print(f"       💾 Saved: {output_file}")
+        print(f"       💾 Saved histogram: {histogram_file}")
+        print(f"       💾 Saved events: {events_file}")
         
         # Clean up
-        del prescriptions_df, physician_df, final_df
+        del prescriptions_df, physician_df, final_df, events_df
         gc.collect()
         
         return {
@@ -369,7 +382,8 @@ def process_prescription_chunk(year, prescription_file):
             'part': part_name,
             'prescription_events': total_events,
             'processing_time': chunk_time,
-            'output_file': output_file,
+            'histogram_file': histogram_file,
+            'events_file': events_file,
             'out_of_thin_air': out_of_thin_air,
             'zero_physicians': zero_physicians
         }
