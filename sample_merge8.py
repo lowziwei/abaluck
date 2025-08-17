@@ -556,16 +556,65 @@ def test_single_file():
         print(f"\n❌ TEST FAILED - check errors above")
 
 def main():
-    print("MarketScan Analysis - SINGLE FILE TEST MODE")
-    print("Testing with one prescription file to check the new phys_ids logic")
+    print("MarketScan Analysis - MULTI-YEAR PHYSICIAN ID ANALYSIS")
+    print("Processing all prescription files for years 2018-2024")
     print("=" * 60)
     
     # Create output directory
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     print(f"📁 Output directory: {OUTPUT_DIR}")
     
-    # Run single file test
-    test_single_file()
+    # Process all years
+    all_results = []
+    total_start_time = time.time()
+    
+    for year in range(START_YEAR, END_YEAR + 1):
+        year_results = process_year(year)
+        all_results.extend(year_results)
+    
+    # Overall summary
+    total_time = time.time() - total_start_time
+    
+    print(f"\n{'='*60}")
+    print(f"OVERALL ANALYSIS COMPLETE")
+    print(f"{'='*60}")
+    
+    if all_results:
+        # Create summary DataFrame
+        summary_df = pd.DataFrame(all_results)
+        
+        # Overall stats
+        total_events = summary_df['prescription_events'].sum()
+        years_processed = summary_df['year'].nunique()
+        files_processed = len(summary_df)
+        
+        print(f"Years processed: {years_processed} ({START_YEAR}-{END_YEAR})")
+        print(f"Prescription files processed: {files_processed}")
+        print(f"Total prescription events: {total_events:,}")
+        print(f"Total processing time: {total_time/60:.1f} minutes")
+        
+        # Save overall summary
+        summary_file = os.path.join(OUTPUT_DIR, f"processing_summary_{START_YEAR}_{END_YEAR}.csv")
+        summary_df.to_csv(summary_file, index=False)
+        print(f"\n💾 Processing summary saved: {summary_file}")
+        
+        # Show output files created
+        histogram_files = glob.glob(os.path.join(OUTPUT_DIR, "unique_phys_*.parquet"))
+        events_files = glob.glob(os.path.join(OUTPUT_DIR, "prescription_events_*.parquet"))
+        print(f"\n📊 Files created:")
+        print(f"   Histogram files: {len(histogram_files)}")
+        print(f"   Events files: {len(events_files)}")
+        
+        # Group by year
+        for year in sorted(summary_df['year'].unique()):
+            year_files = summary_df[summary_df['year'] == year]
+            print(f"   Year {year}: {len(year_files)} files processed")
+        
+        print(f"\n🎉 Multi-year analysis completed successfully!")
+        print(f"📁 All histogram data saved in: {OUTPUT_DIR}")
+        
+    else:
+        print("❌ No results generated - check for errors above")
 
 if __name__ == "__main__":
     main()
