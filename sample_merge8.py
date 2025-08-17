@@ -100,7 +100,7 @@ def load_prescription_chunk(file_path):
         if len(truly_new) == 0:
             return pd.DataFrame()
         
-        # Get unique patients in this chunk
+        # Get unique patients in this chunk - BACK TO FULL SIZE
         patients_in_chunk = set(truly_new['ENROLID'].unique())
         print(f"      Unique patients with truly new prescriptions: {len(patients_in_chunk):,}")
         
@@ -275,8 +275,15 @@ def process_prescription_chunk(year, prescription_file):
     print(f"    🔗 Matching prescriptions to physicians...")
     
     conn = duckdb.connect()
-    conn.execute("SET memory_limit='6GB'")
-    conn.execute("SET threads=3")
+    conn.execute("SET memory_limit='6GB'")  # Back to higher memory since we have space
+    conn.execute("SET threads=3")           # Back to 3 threads
+    # Use root filesystem which has 355GB free instead of /tmp (only 1.9GB)
+    conn.execute("SET temp_directory='/home/zl749/duckdb_temp'")
+    # No need for temp size limit with 355GB available
+    
+    # Create temp directory if it doesn't exist
+    temp_dir = "/home/zl749/duckdb_temp"
+    os.makedirs(temp_dir, exist_ok=True)
     
     try:
         # Register DataFrames
@@ -296,23 +303,64 @@ def process_prescription_chunk(year, prescription_file):
                 ON p.ENROLID = ph.ENROLID 
                 AND ph.SVCDATE BETWEEN (p.SVCDATE::DATE - INTERVAL 30 DAY) 
                                    AND (p.SVCDATE::DATE + INTERVAL 30 DAY)
+        ),
+        unique_phys_per_prescription AS (
+            SELECT DISTINCT
+                ENROLID,
+                prescription_date,
+                CASE WHEN visit_date IS NOT NULL AND PHYS_ID IS NOT NULL
+                     THEN CAST(PHYS_ID as VARCHAR)
+                     ELSE NULL
+                END as phys_id
+            FROM matched_visits
+        ),
+        aggregated_data AS (
+            SELECT 
+                ENROLID,
+                prescription_date,
+                -- Count unique physician IDs
+                COUNT(CASE WHEN phys_id IS NOT NULL THEN 1 END) as unique_phys_id_count,
+                -- Collect all physician IDs (will sort later)
+                STRING_AGG(phys_id, ',' ORDER BY phys_id) as all_phys_ids_str,
+                -- Get visit stats from original data
+                (SELECT COUNT(CASE WHEN visit_date IS NOT NULL THEN 1 END) 
+                 FROM matched_visits mv 
+                 WHERE mv.ENROLID = unique_phys_per_prescription.ENROLID 
+                 AND mv.prescription_date = unique_phys_per_prescription.prescription_date) as actual_visits,
+                (SELECT COUNT(CASE WHEN visit_date IS NOT NULL AND PHYS_ID IS NOT NULL THEN 1 END)
+                 FROM matched_visits mv 
+                 WHERE mv.ENROLID = unique_phys_per_prescription.ENROLID 
+                 AND mv.prescription_date = unique_phys_per_prescription.prescription_date) as visits_with_phys_id,
+                (SELECT COUNT(CASE WHEN visit_date IS NOT NULL AND PHYS_ID IS NULL THEN 1 END)
+                 FROM matched_visits mv 
+                 WHERE mv.ENROLID = unique_phys_per_prescription.ENROLID 
+                 AND mv.prescription_date = unique_phys_per_prescription.prescription_date) as visits_without_phys_id,
+                -- "Out of thin air" indicator
+                CASE WHEN (SELECT COUNT(CASE WHEN visit_date IS NOT NULL THEN 1 END) 
+                          FROM matched_visits mv 
+                          WHERE mv.ENROLID = unique_phys_per_prescription.ENROLID 
+                          AND mv.prescription_date = unique_phys_per_prescription.prescription_date) = 0 
+                     THEN 1 ELSE 0 END as out_of_thin_air
+            FROM unique_phys_per_prescription
+            GROUP BY ENROLID, prescription_date
         )
         SELECT 
             ENROLID,
             prescription_date as SVCDATE,
-            -- Count only real physician IDs (missing = 0, not distinct)
-            COUNT(DISTINCT CASE 
-                WHEN visit_date IS NOT NULL AND PHYS_ID IS NOT NULL
-                THEN CAST(PHYS_ID as VARCHAR)
-            END) as unique_phys_id_count,
-            -- Debug info
-            COUNT(CASE WHEN visit_date IS NOT NULL THEN 1 END) as actual_visits,
-            COUNT(CASE WHEN visit_date IS NOT NULL AND PHYS_ID IS NOT NULL THEN 1 END) as visits_with_phys_id,
-            COUNT(CASE WHEN visit_date IS NOT NULL AND PHYS_ID IS NULL THEN 1 END) as visits_without_phys_id,
-            -- "Out of thin air" indicator
-            CASE WHEN COUNT(CASE WHEN visit_date IS NOT NULL THEN 1 END) = 0 THEN 1 ELSE 0 END as out_of_thin_air
-        FROM matched_visits
-        GROUP BY ENROLID, prescription_date
+            unique_phys_id_count,
+            -- Create phys_ids string with max 3 IDs + ",etc." if more
+            CASE 
+                WHEN unique_phys_id_count = 0 THEN ''
+                WHEN unique_phys_id_count <= 3 THEN all_phys_ids_str
+                ELSE STRING_SPLIT(all_phys_ids_str, ',')[1] || ',' || 
+                     STRING_SPLIT(all_phys_ids_str, ',')[2] || ',' || 
+                     STRING_SPLIT(all_phys_ids_str, ',')[3] || ',etc.'
+            END as phys_ids,
+            actual_visits,
+            visits_with_phys_id,
+            visits_without_phys_id,
+            out_of_thin_air
+        FROM aggregated_data
         ORDER BY ENROLID, prescription_date
         """
         
@@ -347,7 +395,7 @@ def process_prescription_chunk(year, prescription_file):
         histogram_df['zero_physician_events'] = zero_physicians
         
         # Prepare individual events data
-        events_df = final_df[['ENROLID', 'SVCDATE', 'unique_phys_id_count', 'actual_visits', 'visits_with_phys_id', 'visits_without_phys_id', 'out_of_thin_air']].copy()
+        events_df = final_df[['ENROLID', 'SVCDATE', 'unique_phys_id_count', 'phys_ids', 'actual_visits', 'visits_with_phys_id', 'visits_without_phys_id', 'out_of_thin_air']].copy()
         events_df['year'] = year
         events_df['file_number'] = part_name
         
@@ -478,82 +526,46 @@ def test_single_file():
     
     if result:
         print(f"\n🎉 TEST SUCCESSFUL!")
-        print(f"   Output file: {result['output_file']}")
+        print(f"   Histogram file: {result['histogram_file']}")
+        print(f"   Events file: {result['events_file']}")
         print(f"   Prescription events: {result['prescription_events']:,}")
         print(f"   Processing time: {result['processing_time']:.1f}s")
         print(f"   'Out of thin air': {result['out_of_thin_air']:,}")
         
         # Show the histogram file was created
-        output_path = os.path.join(OUTPUT_DIR, result['output_file'])
-        if Path(output_path).exists():
-            print(f"   ✅ Histogram file created: {Path(output_path).stat().st_size / 1024:.1f} KB")
+        histogram_path = os.path.join(OUTPUT_DIR, result['histogram_file'])
+        events_path = os.path.join(OUTPUT_DIR, result['events_file'])
+        
+        if Path(histogram_path).exists():
+            print(f"   ✅ Histogram file created: {Path(histogram_path).stat().st_size / 1024:.1f} KB")
             
             # Quick peek at the histogram data
-            histogram_df = pd.read_parquet(output_path)
+            histogram_df = pd.read_parquet(histogram_path)
             print(f"   📊 Histogram preview:")
             print(histogram_df.head())
-        else:
-            print(f"   ❌ Histogram file not found")
+        
+        if Path(events_path).exists():
+            print(f"   ✅ Events file created: {Path(events_path).stat().st_size / (1024*1024):.1f} MB")
+            
+            # Quick peek at the events data
+            events_df = pd.read_parquet(events_path)
+            print(f"   📋 Events preview:")
+            print(events_df[['ENROLID', 'SVCDATE', 'unique_phys_id_count', 'phys_ids']].head())
+        
     else:
         print(f"\n❌ TEST FAILED - check errors above")
 
 def main():
-    print("MarketScan Analysis - MULTI-YEAR PHYSICIAN ID ANALYSIS")
-    print("Processing all prescription files for years 2018-2024")
+    print("MarketScan Analysis - SINGLE FILE TEST MODE")
+    print("Testing with one prescription file to check the new phys_ids logic")
     print("=" * 60)
     
     # Create output directory
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     print(f"📁 Output directory: {OUTPUT_DIR}")
     
-    # Process all years
-    all_results = []
-    total_start_time = time.time()
-    
-    for year in range(START_YEAR, END_YEAR + 1):
-        year_results = process_year(year)
-        all_results.extend(year_results)
-    
-    # Overall summary
-    total_time = time.time() - total_start_time
-    
-    print(f"\n{'='*60}")
-    print(f"OVERALL ANALYSIS COMPLETE")
-    print(f"{'='*60}")
-    
-    if all_results:
-        # Create summary DataFrame
-        summary_df = pd.DataFrame(all_results)
-        
-        # Overall stats
-        total_events = summary_df['prescription_events'].sum()
-        years_processed = summary_df['year'].nunique()
-        files_processed = len(summary_df)
-        
-        print(f"Years processed: {years_processed} ({START_YEAR}-{END_YEAR})")
-        print(f"Prescription files processed: {files_processed}")
-        print(f"Total prescription events: {total_events:,}")
-        print(f"Total processing time: {total_time/60:.1f} minutes")
-        
-        # Save overall summary
-        summary_file = os.path.join(OUTPUT_DIR, f"processing_summary_{START_YEAR}_{END_YEAR}.csv")
-        summary_df.to_csv(summary_file, index=False)
-        print(f"\n💾 Processing summary saved: {summary_file}")
-        
-        # Show output files created
-        output_files = glob.glob(os.path.join(OUTPUT_DIR, "unique_phys_*.parquet"))
-        print(f"\n📊 Histogram files created: {len(output_files)}")
-        
-        # Group by year
-        for year in sorted(summary_df['year'].unique()):
-            year_files = summary_df[summary_df['year'] == year]
-            print(f"   Year {year}: {len(year_files)} files")
-        
-        print(f"\n🎉 Multi-year analysis completed successfully!")
-        print(f"📁 All histogram data saved in: {OUTPUT_DIR}")
-        
-    else:
-        print("❌ No results generated - check for errors above")
+    # Run single file test
+    test_single_file()
 
 if __name__ == "__main__":
     main()
