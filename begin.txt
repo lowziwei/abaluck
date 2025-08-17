@@ -21,13 +21,6 @@
   vim exercise.py
   run scripts in the background without disruptions > nohup python sample_merge8.py > analysis.log 2>&1 &
 
-# Script is now running ON THE SERVER
-# Your laptop is just a "window" to view the server
-
-# If you close laptop/lose internet:
-# ✅ Script keeps running on the server
-# ❌ You can't see progress until you reconnect
-
 5. Code Sheet
   Press "I" to insert
   Press "esc" to exit
@@ -38,7 +31,7 @@
 6. Troubleshooting commands
   Enter "free -h" to see how much memory storage is still available
   Enter "pkill -9 python" to kill all python codes
-
+  Enter "scp zl749@your-server-ip:/data/MarketScan_data/histogram_results/processing_summary_2018_2024.csv ~/Downloads/" to download specific files to local computer
 
 *Semaglutide National Drug Code (NDC):
 #Ozempic
