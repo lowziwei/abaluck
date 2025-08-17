@@ -31,7 +31,7 @@
 6. Troubleshooting commands
   Enter "free -h" to see how much memory storage is still available
   Enter "pkill -9 python" to kill all python codes
-  Enter "scp zl749@your-server-ip:/data/MarketScan_data/histogram_results/processing_summary_2018_2024.csv ~/Downloads/" to download specific files to local computer
+  Enter "scp zl749@10.5.208.192:/data/MarketScan_data/histogram_results/processing_summary_2018_2024.csv ~/Downloads/" to download specific files to local computer
 
 *Semaglutide National Drug Code (NDC):
 #Ozempic
