@@ -9,5 +9,6 @@
 
 ###### 1pp Scripts
 * sample_merge8.py > import from truly new prescriptions and merge with +/-30 day window for possible NPIs. Exports frequency of unique phys id count and for each prescription events, number of unique phys id associated.
-* histogram_uniq_phys.py > creates two histograms illustrating distribution of unique phys id
-* 
+* histogram_uniq_phys.py > creates a histogram illustrating distribution of unique phys id
+* events_combined.py > subsetted dataset that shows all prescription events with unique_phys_id == 1 and the associated phys_id
+* match_phys_id_ndcnum.py > associate ndcnum from file d with output of events_combined.py and collapse based on enrolid, svcdate, phys_id, d_semaglutide
