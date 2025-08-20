@@ -12,6 +12,28 @@ DATASET_TYPE = "COMMERCIAL_SET_A"
 DATABASE = "CCAE"
 OUTPUT_DIR = "histogram_results"
 
+# Semaglutide NDC codes
+SEMAGLUTIDE_NDCS = [
+    # Ozempic
+    '00169413001', '00169413013', '00169413211', '00169413212',
+    '00169413290', '00169413297', '00169413602', '00169413611', 
+    '00169418103', '00169418113', '00169418190', '00169418197', 
+    '00169477211', '00169477212', '00169477290', '00169477297',
+    '50090594900', '50090513800', '50090513900', '50090605100',
+    
+    # Rybelsus
+    '00169430301', '00169430313', '00169430330', '00169430390', 
+    '00169430393', '00169430399', '00169430701', '00169430713', 
+    '00169430730', '00169431401', '00169431413', '00169431430', 
+    '00169480430', '00169480930', '00169481530', '00169481590',
+    
+    # Wegovy  
+    '00169450101', '00169450114', '00169450501', '00169450514',
+    '00169451701', '00169451714', '00169452401', '00169452414', 
+    '00169452501', '00169452514', '00169452590', '00169452594',
+    '50090582400'
+]
+
 def setup_duckdb_connection(memory_limit='8GB'):
     """
     Create optimized DuckDB connection with performance settings
@@ -70,7 +92,7 @@ def extract_ndcnum_for_year_duckdb(year):
 def merge_ndcnum_with_events_duckdb(year):
     """
     Merge NDCNUM data with prescription events files using DuckDB
-    Filters for unique_phys_id_count = 1
+    Filters for unique_phys_id_count = 1 and adds semaglutide flag
     """
     print(f"🗓️   PROCESSING YEAR {year}")
 
@@ -103,6 +125,10 @@ def merge_ndcnum_with_events_duckdb(year):
     try:
         # Register the NDCNUM data as a temporary table
         conn.register('ndcnum_lookup', ndcnum_data)
+        
+        # Create semaglutide NDC lookup table
+        semaglutide_df = pd.DataFrame({'NDCNUM': SEMAGLUTIDE_NDCS})
+        conn.register('semaglutide_lookup', semaglutide_df)
 
         for events_file in sorted(events_files):
             filename = os.path.basename(events_file)
@@ -134,15 +160,21 @@ def merge_ndcnum_with_events_duckdb(year):
                     output_file = filename.replace('.parquet', '_with_ndcnum.parquet')
                     print(f"     🔧 Debug: Used fallback output: {output_file}")
 
-                # Execute merge query
+                # Execute merge query with semaglutide flag
                 merge_query = f"""
                 SELECT 
                     e.*,
-                    n.NDCNUM
+                    n.NDCNUM,
+                    CASE 
+                        WHEN s.NDCNUM IS NOT NULL THEN 1 
+                        ELSE 0 
+                    END AS d_semaglutide
                 FROM read_parquet('{events_file}') e
                 LEFT JOIN ndcnum_lookup n
                     ON e.ENROLID = n.ENROLID 
                     AND e.SVCDATE = n.SVCDATE
+                LEFT JOIN semaglutide_lookup s
+                    ON n.NDCNUM = s.NDCNUM
                 WHERE e.unique_phys_id_count = 1
                 """
 
@@ -153,10 +185,15 @@ def merge_ndcnum_with_events_duckdb(year):
                 matched_count = merged_df['NDCNUM'].notna().sum()
                 missing_count = total_events - matched_count
                 match_pct = (matched_count/total_events*100) if total_events > 0 else 0
+                
+                # Semaglutide statistics
+                semaglutide_count = merged_df['d_semaglutide'].sum()
+                semaglutide_pct = (semaglutide_count/total_events*100) if total_events > 0 else 0
 
                 print(f"     Events (unique_phys_id_count = 1): {total_events:,}")
                 print(f"     Matched with NDCNUM: {matched_count:,} ({match_pct:.1f}%)")
                 print(f"     Missing NDCNUM: {missing_count:,}")
+                print(f"     Semaglutide prescriptions: {semaglutide_count:,} ({semaglutide_pct:.1f}%)")
 
                 # Save file
                 merged_df.to_parquet(output_file, compression='snappy')
@@ -217,12 +254,11 @@ def main():
     """
     Main function - automatically process all years
     """
-    print("MarketScan NDCNUM Merge")
-    print("=" * 30)
+    print("MarketScan NDCNUM Merge with Semaglutide Flag")
+    print("=" * 45)
 
     # Process all years
     process_all_years_automatically()
 
 if __name__ == "__main__":
     main()
-                                                                                                                                                             231,10        Bot
