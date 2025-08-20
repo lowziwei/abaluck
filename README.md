@@ -12,3 +12,9 @@
 * histogram_uniq_phys.py > creates a histogram illustrating distribution of unique phys id
 * events_combined.py > subsetted dataset that shows all prescription events with unique_phys_id == 1 and the associated phys_id
 * match_phys_id_ndcnum.py > associate ndcnum from file d with output of events_combined.py and collapse based on enrolid, svcdate, phys_id, d_semaglutide
+
+
+##### dataframes
+* prescription_events_YYYY_PP_with_ndcnum.parquet > pairs per prescription event that has unique_phys_id count == 1, with phys_id and ndcnum info.
+* phys_id_ndcnum.parquet > for each phys_id, svcdate pair, show total patients, total prescriptions, fraction of prescriptions that are semaglutide, fraction of patients receiving semaglutide
+
