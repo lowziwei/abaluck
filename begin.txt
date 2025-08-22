@@ -14,7 +14,7 @@
 3. Pull data
   cd /data/MarketScan_data
   
-  A. COMMERCIAL_SET_A | MEDICARE_SET_A | Medicaid
+  A. COMMERCIAL_SET_A (CCAE) | MEDICARE_SET_A (MDCR) | Medicaid
     COMMERCIAL_SET_A contains CCAE_D_2014.parquet variations for D = (F, O, T), variations for 2014 = (2015...2024), CCAE_S.parquet, and CCAE_A.parquet
 
 4. Write python scripts
