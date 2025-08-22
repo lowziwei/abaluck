@@ -3,12 +3,13 @@ import numpy as np
 import os
 import json
 
-def analyze_top100_random_groups():
+def analyze_top100_random_groups_wide():
     """
     Split top 100 physicians (by patients) into random groups of 10 and analyze each group
+    OUTPUT: Wide format (months as rows, groups as columns)
     """
-    print("🎲 RANDOM GROUPS ANALYSIS - TOP 100 PHYSICIANS")
-    print("=" * 55)
+    print("🎲 RANDOM GROUPS ANALYSIS - TOP 100 PHYSICIANS (WIDE FORMAT)")
+    print("=" * 65)
     
     # Input files
     monthly_file = "physician_monthly_semaglutide_analysis.parquet"
@@ -138,26 +139,51 @@ def analyze_top100_random_groups():
             'phys_ids': group_phys_ids
         })
     
-    # Combine all monthly data
-    combined_monthly = pd.concat(all_monthly_results, ignore_index=True)
+    # Combine all monthly data (LONG format)
+    combined_monthly_long = pd.concat(all_monthly_results, ignore_index=True)
+    combined_monthly_long = combined_monthly_long.sort_values(['group_id', 'year_month']).reset_index(drop=True)
     
-    # Sort by month for plotting
-    combined_monthly = combined_monthly.sort_values(['group_id', 'year_month']).reset_index(drop=True)
+    # Step 5: Create WIDE format datasets
+    print(f"\n🔄 Converting to WIDE format...")
     
-    print(f"\n📊 COMBINED MONTHLY DATA:")
-    print(f"   Total month-group combinations: {len(combined_monthly):,}")
-    print(f"   Date range: {combined_monthly['year_month'].min()} to {combined_monthly['year_month'].max()}")
-    print(f"   Zero prescription months: {(combined_monthly['total_prescriptions'] == 0).sum():,}")
+    # Wide format for prescriptions (months x groups)
+    prescriptions_wide = combined_monthly_long.pivot(
+        index='year_month', 
+        columns='group_id', 
+        values='total_prescriptions'
+    )
+    prescriptions_wide.columns = [f'group_{col}_prescriptions' for col in prescriptions_wide.columns]
+    prescriptions_wide = prescriptions_wide.reset_index()
     
-    # Step 5: Create summary dataframe  
+    # Wide format for semaglutide fractions (months x groups)
+    semaglutide_wide = combined_monthly_long.pivot(
+        index='year_month', 
+        columns='group_id', 
+        values='fraction_patients_semaglutide'
+    )
+    semaglutide_wide.columns = [f'group_{col}_semaglutide_fraction' for col in semaglutide_wide.columns]
+    semaglutide_wide = semaglutide_wide.reset_index()
+    
+    # Combined wide format (both metrics)
+    combined_wide = prescriptions_wide.merge(semaglutide_wide, on='year_month')
+    
+    print(f"✅ Created wide format datasets:")
+    print(f"   Wide prescriptions: {prescriptions_wide.shape[0]} months × {prescriptions_wide.shape[1]-1} group columns")
+    print(f"   Wide semaglutide: {semaglutide_wide.shape[0]} months × {semaglutide_wide.shape[1]-1} group columns") 
+    print(f"   Combined wide: {combined_wide.shape[0]} months × {combined_wide.shape[1]-1} total columns")
+    
+    # Step 6: Create summary dataframe  
     summary_df = pd.DataFrame(group_summaries)
     
-    # Step 6: Show sample of monthly data
-    print(f"\n👀 SAMPLE MONTHLY DATA (first 15 rows):")
-    sample_cols = ['group_id', 'year_month', 'total_prescriptions', 'fraction_patients_semaglutide']
-    print(combined_monthly[sample_cols].head(15).round(4).to_string(index=False))
+    # Step 7: Show sample of wide data
+    print(f"\n👀 SAMPLE WIDE DATA (first 10 months):")
+    print("PRESCRIPTIONS BY GROUP:")
+    print(prescriptions_wide.head(10).to_string(index=False))
     
-    # Step 7: Overall summary statistics
+    print(f"\nSEMAGLUTIDE FRACTIONS BY GROUP:")
+    print(semaglutide_wide.head(10).round(4).to_string(index=False))
+    
+    # Step 8: Summary statistics
     print(f"\n📊 OVERALL GROUP SUMMARY:")
     print("=" * 40)
     
@@ -165,33 +191,31 @@ def analyze_top100_random_groups():
     print(f"   Prescriptions per month: {summary_df['avg_prescriptions_per_month'].mean():,.1f} (±{summary_df['avg_prescriptions_per_month'].std():,.1f})")
     print(f"   Semaglutide fraction: {summary_df['avg_semaglutide_fraction'].mean():.4f} (±{summary_df['avg_semaglutide_fraction'].std():.4f})")
     
-    print(f"\nRange across groups:")
-    print(f"   Prescriptions per month: {summary_df['avg_prescriptions_per_month'].min():,.1f} to {summary_df['avg_prescriptions_per_month'].max():,.1f}")
-    print(f"   Semaglutide fraction: {summary_df['avg_semaglutide_fraction'].min():.4f} to {summary_df['avg_semaglutide_fraction'].max():.4f}")
-    
-    # Step 8: Display summary table
-    print(f"\n📋 GROUP SUMMARY TABLE:")
-    display_df = summary_df[['group_id', 'physician_count', 'total_months', 'active_months', 'avg_prescriptions_per_month', 'avg_semaglutide_fraction']].copy()
-    display_df['avg_prescriptions_per_month'] = display_df['avg_prescriptions_per_month'].round(1)
-    display_df['avg_semaglutide_fraction'] = display_df['avg_semaglutide_fraction'].round(4)
-    print(display_df.to_string(index=False))
-    
     # Step 9: Save results
     print(f"\n💾 Saving results...")
     
-    # Save randomization token first
+    # Save randomization token
     with open('randomization_token.json', 'w') as f:
         json.dump(randomization_token, f, indent=2)
     
-    # Save monthly data (MAIN FILE FOR PLOTTING)
-    combined_monthly.to_parquet("top100_groups_monthly_timeseries.parquet", compression='snappy')
-    combined_monthly.to_csv("top100_groups_monthly_timeseries.csv", index=False)
+    # Save LONG format (original)
+    combined_monthly_long.to_parquet("top100_groups_monthly_timeseries_long.parquet", compression='snappy')
+    combined_monthly_long.to_csv("top100_groups_monthly_timeseries_long.csv", index=False)
     
-    # Save summary
+    # Save WIDE format files
+    prescriptions_wide.to_parquet("top100_groups_prescriptions_wide.parquet", compression='snappy')
+    prescriptions_wide.to_csv("top100_groups_prescriptions_wide.csv", index=False)
+    
+    semaglutide_wide.to_parquet("top100_groups_semaglutide_wide.parquet", compression='snappy')
+    semaglutide_wide.to_csv("top100_groups_semaglutide_wide.csv", index=False)
+    
+    combined_wide.to_parquet("top100_groups_combined_wide.parquet", compression='snappy')
+    combined_wide.to_csv("top100_groups_combined_wide.csv", index=False)
+    
+    # Save summary and assignments
     summary_df.to_parquet("top100_random_groups_summary.parquet", compression='snappy')
     summary_df.to_csv("top100_random_groups_summary.csv", index=False)
     
-    # Save group assignments
     group_assignments = []
     for result in group_summaries:
         for phys_id in result['phys_ids']:
@@ -205,26 +229,27 @@ def analyze_top100_random_groups():
     assignments_df.to_csv("top100_group_assignments.csv", index=False)
     
     print(f"✅ Saved: randomization_token.json (RANDOMIZATION TOKEN)")
-    print(f"✅ Saved: top100_groups_monthly_timeseries.parquet/csv (MAIN PLOTTING FILE)")
+    print(f"✅ Saved: LONG format - top100_groups_monthly_timeseries_long.parquet/csv")
+    print(f"✅ Saved: WIDE format - top100_groups_prescriptions_wide.parquet/csv")
+    print(f"✅ Saved: WIDE format - top100_groups_semaglutide_wide.parquet/csv")
+    print(f"✅ Saved: WIDE format - top100_groups_combined_wide.parquet/csv (MAIN WIDE FILE)")
     print(f"✅ Saved: top100_random_groups_summary.parquet/csv")
     print(f"✅ Saved: top100_group_assignments.parquet/csv")
     
-    print(f"\n🔐 RANDOMIZATION TOKEN:")
-    print(f"   Random seed: {RANDOM_SEED}")
-    print(f"   Token file: randomization_token.json")
-    print(f"   Use this to reproduce exact same groups later")
-    
-    print(f"\n📊 FOR PLOTTING:")
-    print(f"   Main file: top100_groups_monthly_timeseries.csv")
-    print(f"   Columns: group_id, year_month, total_prescriptions, fraction_patients_semaglutide")
-    print(f"   Each row = one group in one month")
+    print(f"\n📊 OUTPUT FORMATS:")
+    print(f"   LONG format: Each row = one group-month combination")
+    print(f"   WIDE format: Each row = one month, columns = groups")
+    print(f"   Main wide file: top100_groups_combined_wide.csv")
     
     return {
-        'monthly_data': combined_monthly,
+        'monthly_data_long': combined_monthly_long,
+        'prescriptions_wide': prescriptions_wide,
+        'semaglutide_wide': semaglutide_wide,
+        'combined_wide': combined_wide,
         'summary': summary_df,
         'assignments': assignments_df,
         'randomization_token': randomization_token
     }
 
 if __name__ == "__main__":
-    results = analyze_top100_random_groups()
+    results = analyze_top100_random_groups_wide()
