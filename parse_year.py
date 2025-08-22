@@ -4,15 +4,15 @@ import os
 import time
 from pathlib import Path
 
-def setup_duckdb_connection(memory_limit='8GB'):
+def setup_duckdb_connection(memory_limit='4GB'):
     """
-    Create optimized DuckDB connection
+    Create optimized DuckDB connection with reduced memory
     """
     conn = duckdb.connect(':memory:')
-    conn.execute(f"SET memory_limit='{memory_limit}'")
+    conn.execute(f"SET memory_limit='{memory_limit}'")  # Reduced from 8GB
     conn.execute("SET max_temp_directory_size='20GB'")
     conn.execute("SET temp_directory='/data/MarketScan_data/temp'")
-    conn.execute("SET threads=8")
+    conn.execute("SET threads=4")  # Reduced threads
     conn.execute("SET preserve_insertion_order=false")
     conn.execute("SET enable_progress_bar=false")
     
@@ -45,27 +45,6 @@ def explore_medicare_file():
         total_records = conn.execute(count_query).fetchdf()['total_records'].iloc[0]
         print(f"📊 Total records: {total_records:,}")
         
-        # Get column info
-        columns_query = f"DESCRIBE SELECT * FROM '{input_file}'"
-        columns_df = conn.execute(columns_query).fetchdf()
-        print(f"📋 Columns ({len(columns_df)}):")
-        for _, row in columns_df.iterrows():
-            print(f"   {row['column_name']}: {row['column_type']}")
-        
-        # Check SVCDATE format and range
-        date_query = f"""
-        SELECT 
-            MIN(SVCDATE) as min_date,
-            MAX(SVCDATE) as max_date,
-            COUNT(DISTINCT EXTRACT(year FROM CAST(SVCDATE AS DATE))) as unique_years
-        FROM '{input_file}'
-        WHERE SVCDATE IS NOT NULL
-        """
-        date_info = conn.execute(date_query).fetchdf()
-        print(f"\n📅 SVCDATE INFO:")
-        print(f"   Date range: {date_info['min_date'].iloc[0]} to {date_info['max_date'].iloc[0]}")
-        print(f"   Unique years: {date_info['unique_years'].iloc[0]}")
-        
         # Get year distribution
         year_query = f"""
         SELECT 
@@ -73,23 +52,13 @@ def explore_medicare_file():
             COUNT(*) as record_count
         FROM '{input_file}'
         WHERE SVCDATE IS NOT NULL
-        GROUP BY year
+        GROUP BY EXTRACT(year FROM CAST(SVCDATE AS DATE))
         ORDER BY year
         """
         year_dist = conn.execute(year_query).fetchdf()
         print(f"\n📈 YEAR DISTRIBUTION:")
         for _, row in year_dist.iterrows():
             print(f"   {int(row['year'])}: {row['record_count']:,} records")
-        
-        # Sample data
-        sample_query = f"""
-        SELECT *
-        FROM '{input_file}'
-        LIMIT 5
-        """
-        sample_df = conn.execute(sample_query).fetchdf()
-        print(f"\n👀 SAMPLE DATA:")
-        print(sample_df.to_string(index=False))
         
         conn.close()
         return year_dist
@@ -99,12 +68,109 @@ def explore_medicare_file():
         conn.close()
         return None
 
-def parse_medicare_by_year(year_list=None, output_dir="medicare_parsed"):
+def parse_year_chunked(year, chunk_size=50000, output_dir="medicare_parsed"):
     """
-    Parse Medicare prescription drug file by year
+    Parse a single year using chunking to avoid memory issues
     """
-    print("🔄 PARSING MEDICARE FILE BY YEAR")
-    print("=" * 40)
+    print(f"\n📅 Processing year {year} with chunking...")
+    
+    input_file = "MEDICARE_SET_A/MDCR_D.parquet"
+    output_file = f"{output_dir}/MDCR_D_{year}.parquet"
+    
+    conn = setup_duckdb_connection()
+    start_time = time.time()
+    
+    try:
+        # First, get total count for this year
+        count_query = f"""
+        SELECT COUNT(*) as count
+        FROM '{input_file}'
+        WHERE EXTRACT(year FROM CAST(SVCDATE AS DATE)) = {year}
+        """
+        total_count = conn.execute(count_query).fetchdf()['count'].iloc[0]
+        
+        if total_count == 0:
+            print(f"   ⚠️  No records for year {year}")
+            conn.close()
+            return None
+        
+        print(f"   📊 Found {total_count:,} records for year {year}")
+        print(f"   🔄 Processing in chunks of {chunk_size:,} records...")
+        
+        # Process in chunks using DuckDB's built-in chunking
+        chunk_num = 0
+        offset = 0
+        all_chunks = []
+        
+        while offset < total_count:
+            chunk_query = f"""
+            SELECT *
+            FROM '{input_file}'
+            WHERE EXTRACT(year FROM CAST(SVCDATE AS DATE)) = {year}
+            ORDER BY SVCDATE
+            LIMIT {chunk_size} OFFSET {offset}
+            """
+            
+            chunk_df = conn.execute(chunk_query).fetchdf()
+            
+            if len(chunk_df) == 0:
+                break
+            
+            all_chunks.append(chunk_df)
+            chunk_num += 1
+            offset += chunk_size
+            
+            print(f"   📦 Processed chunk {chunk_num}: {len(chunk_df):,} records ({offset:,}/{total_count:,})")
+            
+            # Clean up chunk from memory
+            del chunk_df
+            import gc
+            gc.collect()
+        
+        # Combine all chunks and save
+        if all_chunks:
+            print(f"   🔗 Combining {len(all_chunks)} chunks...")
+            final_df = pd.concat(all_chunks, ignore_index=True)
+            
+            # Save to parquet
+            final_df.to_parquet(output_file, compression='snappy')
+            
+            # Get file size
+            file_size_mb = os.path.getsize(output_file) / (1024*1024)
+            processing_time = time.time() - start_time
+            
+            print(f"   ✅ Saved {len(final_df):,} records")
+            print(f"   💾 File: {os.path.basename(output_file)} ({file_size_mb:.1f} MB)")
+            print(f"   ⏱️  Time: {processing_time:.1f} seconds")
+            
+            # Clean up
+            del final_df, all_chunks
+            gc.collect()
+            
+            conn.close()
+            
+            return {
+                'year': year,
+                'records': total_count,
+                'output_file': output_file,
+                'file_size_mb': file_size_mb,
+                'processing_time': processing_time
+            }
+        
+        conn.close()
+        return None
+        
+    except Exception as e:
+        print(f"   💥 Error processing year {year}: {e}")
+        conn.close()
+        return None
+
+def parse_medicare_chunked(year_list=None, output_dir="medicare_parsed", chunk_size=50000):
+    """
+    Parse Medicare file by year using memory-efficient chunking
+    """
+    print("🔄 PARSING MEDICARE FILE BY YEAR (CHUNKED)")
+    print("=" * 50)
     
     input_file = "MEDICARE_SET_A/MDCR_D.parquet"
     
@@ -115,70 +181,27 @@ def parse_medicare_by_year(year_list=None, output_dir="medicare_parsed"):
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
     print(f"📁 Output directory: {output_dir}")
+    print(f"🧩 Chunk size: {chunk_size:,} records")
     
-    conn = setup_duckdb_connection()
+    # Get available years if none specified
+    if year_list is None:
+        print("🔍 Getting available years...")
+        year_dist = explore_medicare_file()
+        if year_dist is None:
+            return
+        year_list = year_dist['year'].astype(int).tolist()
     
-    try:
-        # If no year list provided, get all available years
-        if year_list is None:
-            year_query = f"""
-            SELECT DISTINCT EXTRACT(year FROM CAST(SVCDATE AS DATE)) as year
-            FROM '{input_file}'
-            WHERE SVCDATE IS NOT NULL
-            ORDER BY year
-            """
-            years_df = conn.execute(year_query).fetchdf()
-            year_list = years_df['year'].astype(int).tolist()
-        
-        print(f"🎯 Processing years: {year_list}")
-        
-        results = []
-        
-        for year in year_list:
-            print(f"\n📅 Processing year {year}...")
-            start_time = time.time()
-            
-            # Extract data for this year
-            year_query = f"""
-            SELECT *
-            FROM '{input_file}'
-            WHERE EXTRACT(year FROM CAST(SVCDATE AS DATE)) = {year}
-            """
-            
-            year_df = conn.execute(year_query).fetchdf()
-            
-            if len(year_df) == 0:
-                print(f"   ⚠️  No records found for year {year}")
-                continue
-            
-            # Save as parquet
-            output_file = f"{output_dir}/MDCR_D_{year}.parquet"
-            year_df.to_parquet(output_file, compression='snappy')
-            
-            # Calculate file size
-            file_size_mb = os.path.getsize(output_file) / (1024*1024)
-            processing_time = time.time() - start_time
-            
-            print(f"   ✅ Processed {len(year_df):,} records")
-            print(f"   💾 Saved: {os.path.basename(output_file)} ({file_size_mb:.1f} MB)")
-            print(f"   ⏱️  Time: {processing_time:.1f} seconds")
-            
-            results.append({
-                'year': year,
-                'records': len(year_df),
-                'output_file': output_file,
-                'file_size_mb': file_size_mb,
-                'processing_time': processing_time
-            })
-            
-            # Clean up
-            del year_df
-            import gc
-            gc.collect()
-        
-        conn.close()
-        
-        # Summary
+    print(f"🎯 Processing years: {year_list}")
+    
+    results = []
+    
+    for year in year_list:
+        result = parse_year_chunked(year, chunk_size, output_dir)
+        if result:
+            results.append(result)
+    
+    # Summary
+    if results:
         print(f"\n📊 PARSING SUMMARY:")
         print("=" * 50)
         
@@ -202,64 +225,59 @@ def parse_medicare_by_year(year_list=None, output_dir="medicare_parsed"):
         print(f"\n💾 Summary saved: {summary_file}")
         
         return results
-        
-    except Exception as e:
-        print(f"💥 Error: {e}")
-        conn.close()
-        return None
+    
+    return None
 
-def parse_specific_years(years, output_dir="medicare_parsed"):
+def parse_single_year_test(year=2020):
     """
-    Parse specific years only
+    Test parsing a single year to check memory usage
     """
-    print(f"🎯 PARSING SPECIFIC YEARS: {years}")
-    return parse_medicare_by_year(year_list=years, output_dir=output_dir)
+    print(f"🧪 TEST: Parsing single year {year}")
+    result = parse_year_chunked(year, chunk_size=25000)  # Smaller chunks for testing
+    return result
 
 def main():
     """
-    Main function with options
+    Main function with chunked options
     """
-    print("Medicare Prescription Drug File Parser")
-    print("=" * 40)
+    print("Medicare Prescription Drug File Parser (Memory-Efficient)")
+    print("=" * 60)
     
-    # Step 1: Explore the file
-    print("Step 1: Exploring file structure...")
-    year_dist = explore_medicare_file()
-    
-    if year_dist is None:
-        return
-    
-    print(f"\n" + "="*50)
     print("PARSING OPTIONS:")
-    print("1. Parse all years")
-    print("2. Parse specific years")
+    print("1. Test single year (2020)")
+    print("2. Parse specific years") 
     print("3. Parse recent years (2020-2024)")
+    print("4. Parse all years")
     
-    choice = input("\nChoose option (1/2/3): ").strip()
+    choice = input("\nChoose option (1/2/3/4): ").strip()
     
     if choice == "1":
-        # Parse all years
-        results = parse_medicare_by_year()
+        # Test single year
+        result = parse_single_year_test()
+        if result:
+            print(f"\n✅ Test successful! File size: {result['file_size_mb']:.1f} MB")
     elif choice == "2":
         # Parse specific years
         years_input = input("Enter years (comma-separated, e.g., 2018,2019,2020): ")
         try:
             years = [int(y.strip()) for y in years_input.split(',')]
-            results = parse_specific_years(years)
+            results = parse_medicare_chunked(year_list=years)
         except ValueError:
             print("❌ Invalid year format. Please use numbers separated by commas.")
             return
     elif choice == "3":
         # Parse recent years
         recent_years = [2020, 2021, 2022, 2023, 2024]
-        results = parse_specific_years(recent_years)
+        results = parse_medicare_chunked(year_list=recent_years)
+    elif choice == "4":
+        # Parse all years
+        results = parse_medicare_chunked()
     else:
         print("❌ Invalid choice")
         return
     
-    if results:
-        print(f"\n🎉 PARSING COMPLETE!")
-        print(f"Output files in: medicare_parsed/")
+    print(f"\n🎉 PARSING COMPLETE!")
+    print(f"Output files in: medicare_parsed/")
 
 if __name__ == "__main__":
     main()
