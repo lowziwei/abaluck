@@ -17,4 +17,5 @@
 ##### dataframes
 * prescription_events_YYYY_PP_with_ndcnum.parquet > pairs per prescription event that has unique_phys_id count == 1, with phys_id and ndcnum info, and a dummy for semaglutide
 * phys_id_ndcnum.parquet > for each phys_id, svcdate pair, show total patients, total prescriptions, fraction of prescriptions that are semaglutide, fraction of patients receiving semaglutide
+* physician_monthly_semaglutide_analysis.parquet > same as phys_id_ndcnum.parquet but collapsed monthly
 
