@@ -683,4 +683,10 @@ def main():
             print(f"   Year {year}: {len(year_files)} files processed")
         
         print(f"\n🎉 Flexible time window analysis completed successfully!")
-        print(f"📁 All data saved in: {
+        print(f"📁 All data saved in: {OUTPUT_DIR}")
+        
+    else:
+        print("❌ No results generated - check for errors above")
+
+if __name__ == "__main__":
+    main()
