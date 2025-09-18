@@ -264,8 +264,8 @@ def main():
     years = [2018, 2019, 2020, 2021, 2022, 2023, 2024]
     
     # CUSTOMIZABLE YEAR SELECTION
-    years_to_process = years  # Process all years
-    # years_to_process = [2018]  # Only specific years
+    # years_to_process = years  # Process all years
+    years_to_process = [2018]  # Only specific years
 
     output_dir = '/data/MarketScan_data'
     
