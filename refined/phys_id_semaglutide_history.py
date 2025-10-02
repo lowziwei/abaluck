@@ -13,7 +13,7 @@ def aggregate_to_physician_level():
     
     if not parquet_files:
         print("No files with diagnosis data found!")
-        return None
+        return None, None
     
     print(f"Found {len(parquet_files)} files to process")
     
@@ -70,77 +70,128 @@ def aggregate_to_physician_level():
     print(f"  Unique physician-date combinations: {len(combined_df):,}")
     print(f"  Total prescriptions: {combined_df['total_prescriptions'].sum():,}")
     
-    return combined_df
+    return combined_df, parquet_files
 
-def aggregate_to_monthly_level(physician_date_df):
+def aggregate_to_monthly_level(parquet_files):
     """
-    Step 2: Aggregate physician-date data to physician-month level
+    Step 2: Aggregate prescription events directly to physician-month level
+    This avoids double-counting patients who appear on multiple dates
     """
     print("\nSTEP 2: PHYSICIAN-MONTH AGGREGATION")
     print("=" * 60)
     
-    df = physician_date_df.copy()
-    df['SVCDATE'] = pd.to_datetime(df['SVCDATE'])
-    df['year_month'] = df['SVCDATE'].dt.to_period('M')
+    all_monthly = []
     
-    monthly_stats = []
-    
-    for (phys_id, year_month), group in df.groupby(['phys_ids', 'year_month']):
-        total_patients = group['total_patients'].sum()
-        total_prescriptions = group['total_prescriptions'].sum()
-        eligible_patients = group['eligible_patients'].sum()
-        semaglutide_prescriptions = group['semaglutide_prescriptions'].sum()
-        semaglutide_patients = group['semaglutide_patients'].sum()
+    for file in sorted(parquet_files):
+        print(f"  Processing: {os.path.basename(file)}")
+        df = pd.read_parquet(file)
         
-        # Semaglutide in eligible (approximate from aggregated data)
-        # This is an approximation since we don't have individual patient eligibility at this level
-        semaglutide_in_eligible = min(semaglutide_patients, eligible_patients)
+        # Convert to datetime and create year-month period
+        df['SVCDATE'] = pd.to_datetime(df['SVCDATE'])
+        df['year_month'] = df['SVCDATE'].dt.to_period('M')
         
-        fraction_patients_eligible = eligible_patients / total_patients if total_patients > 0 else 0
-        fraction_prescriptions_semaglutide = semaglutide_prescriptions / total_prescriptions if total_prescriptions > 0 else 0
-        fraction_eligible_get_semaglutide = semaglutide_in_eligible / eligible_patients if eligible_patients > 0 else 0
+        # Basic aggregation - unique patients and counts per physician-month
+        monthly = df.groupby(['phys_ids', 'year_month']).agg({
+            'ENROLID': 'nunique',      # Unique patients per month
+            'NDCNUM': 'count',          # Total prescriptions
+            'd_semaglutide': 'sum',     # Semaglutide prescriptions
+            'SVCDATE': 'nunique'        # Number of service dates
+        }).reset_index()
         
-        service_dates_count = len(group)
+        monthly.columns = ['phys_ids', 'year_month', 'total_patients', 'total_prescriptions', 
+                          'semaglutide_prescriptions', 'service_dates_count']
         
-        monthly_stats.append({
-            'phys_ids': phys_id,
-            'year_month': str(year_month),
-            'year': year_month.year,
-            'month': year_month.month,
-            'service_dates_count': service_dates_count,
-            'total_patients': total_patients,
-            'total_prescriptions': total_prescriptions,
-            'eligible_patients': eligible_patients,
-            'semaglutide_prescriptions': semaglutide_prescriptions,
-            'semaglutide_patients': semaglutide_patients,
-            'semaglutide_in_eligible': semaglutide_in_eligible,
-            'fraction_patients_eligible': fraction_patients_eligible,
-            'fraction_prescriptions_semaglutide': fraction_prescriptions_semaglutide,
-            'fraction_eligible_get_semaglutide': fraction_eligible_get_semaglutide
-        })
+        # Count unique eligible patients per month (diabetes OR obesity)
+        eligible_patients = df[
+            (df['d_diagnosis_eligible_diab'] == 1) | (df['d_diagnosis_eligible_obes'] == 1)
+        ].groupby(['phys_ids', 'year_month'])['ENROLID'].nunique().reset_index()
+        eligible_patients.columns = ['phys_ids', 'year_month', 'eligible_patients']
+        
+        monthly = monthly.merge(eligible_patients, on=['phys_ids', 'year_month'], how='left')
+        monthly['eligible_patients'] = monthly['eligible_patients'].fillna(0).astype(int)
+        
+        # Count unique semaglutide patients per month
+        sema_patients = df[df['d_semaglutide'] == 1].groupby(['phys_ids', 'year_month'])['ENROLID'].nunique().reset_index()
+        sema_patients.columns = ['phys_ids', 'year_month', 'semaglutide_patients']
+        
+        monthly = monthly.merge(sema_patients, on=['phys_ids', 'year_month'], how='left')
+        monthly['semaglutide_patients'] = monthly['semaglutide_patients'].fillna(0).astype(int)
+        
+        # Count unique patients who are both eligible AND got semaglutide
+        eligible_sema_patients = df[
+            ((df['d_diagnosis_eligible_diab'] == 1) | (df['d_diagnosis_eligible_obes'] == 1)) & 
+            (df['d_semaglutide'] == 1)
+        ].groupby(['phys_ids', 'year_month'])['ENROLID'].nunique().reset_index()
+        eligible_sema_patients.columns = ['phys_ids', 'year_month', 'semaglutide_in_eligible']
+        
+        monthly = monthly.merge(eligible_sema_patients, on=['phys_ids', 'year_month'], how='left')
+        monthly['semaglutide_in_eligible'] = monthly['semaglutide_in_eligible'].fillna(0).astype(int)
+        
+        all_monthly.append(monthly)
     
-    monthly_df = pd.DataFrame(monthly_stats)
-    monthly_df = monthly_df.sort_values(['phys_ids', 'year', 'month']).reset_index(drop=True)
+    # Combine all files
+    final_monthly = pd.concat(all_monthly, ignore_index=True)
     
-    print(f"Physician-month level complete:")
-    print(f"  Monthly physician combinations: {len(monthly_df):,}")
-    print(f"  Unique physicians: {monthly_df['phys_ids'].nunique():,}")
-    print(f"  Total prescriptions: {monthly_df['total_prescriptions'].sum():,}")
-    print(f"  Eligible patients: {monthly_df['eligible_patients'].sum():,}")
+    # Aggregate any physician-month combinations split across files
+    combined_monthly = final_monthly.groupby(['phys_ids', 'year_month']).agg({
+        'total_patients': 'sum',
+        'total_prescriptions': 'sum',
+        'semaglutide_prescriptions': 'sum',
+        'semaglutide_patients': 'sum',
+        'eligible_patients': 'sum',
+        'semaglutide_in_eligible': 'sum',
+        'service_dates_count': 'sum'
+    }).reset_index()
     
-    return monthly_df
+    # Add year and month columns
+    combined_monthly['year'] = combined_monthly['year_month'].apply(lambda x: x.year)
+    combined_monthly['month'] = combined_monthly['year_month'].apply(lambda x: x.month)
+    combined_monthly['year_month'] = combined_monthly['year_month'].astype(str)
+    
+    # Calculate fractions
+    combined_monthly['fraction_patients_eligible'] = (
+        combined_monthly['eligible_patients'] / combined_monthly['total_patients']
+    ).fillna(0)
+    
+    combined_monthly['fraction_prescriptions_semaglutide'] = (
+        combined_monthly['semaglutide_prescriptions'] / combined_monthly['total_prescriptions']
+    ).fillna(0)
+    
+    combined_monthly['fraction_eligible_get_semaglutide'] = (
+        combined_monthly['semaglutide_in_eligible'] / combined_monthly['eligible_patients']
+    ).fillna(0)
+    
+    # Reorder columns
+    combined_monthly = combined_monthly[[
+        'phys_ids', 'year_month', 'year', 'month', 'service_dates_count',
+        'total_patients', 'total_prescriptions', 'eligible_patients',
+        'semaglutide_prescriptions', 'semaglutide_patients', 'semaglutide_in_eligible',
+        'fraction_patients_eligible', 'fraction_prescriptions_semaglutide',
+        'fraction_eligible_get_semaglutide'
+    ]]
+    
+    combined_monthly = combined_monthly.sort_values(['phys_ids', 'year', 'month']).reset_index(drop=True)
+    
+    print(f"\nPhysician-month level complete:")
+    print(f"  Monthly physician combinations: {len(combined_monthly):,}")
+    print(f"  Unique physicians: {combined_monthly['phys_ids'].nunique():,}")
+    print(f"  Total prescriptions: {combined_monthly['total_prescriptions'].sum():,}")
+    print(f"  Unique patients (total across all months): {combined_monthly['total_patients'].sum():,}")
+    print(f"  Eligible patients (total across all months): {combined_monthly['eligible_patients'].sum():,}")
+    
+    return combined_monthly
 
 def main():
     """
     Combined aggregation pipeline:
     1. Aggregate individual prescription events to physician-date level
-    2. Aggregate physician-date to physician-month level
+    2. Aggregate prescription events directly to physician-month level
     """
     print("PHYSICIAN SEMAGLUTIDE ANALYSIS - COMBINED AGGREGATION")
     print("=" * 60)
     
     # Step 1: Physician-date level
-    physician_date_df = aggregate_to_physician_level()
+    physician_date_df, parquet_files = aggregate_to_physician_level()
     
     if physician_date_df is None:
         return
@@ -149,8 +200,8 @@ def main():
     physician_date_df.to_parquet("physician_semaglutide_analysis_with_diagnosis.parquet", compression='snappy')
     print(f"\nSaved: physician_semaglutide_analysis_with_diagnosis.parquet")
     
-    # Step 2: Physician-month level
-    monthly_df = aggregate_to_monthly_level(physician_date_df)
+    # Step 2: Physician-month level (directly from event data)
+    monthly_df = aggregate_to_monthly_level(parquet_files)
     
     # Save monthly level
     monthly_df.to_parquet("physician_monthly_semaglutide_with_eligibility.parquet", compression='snappy')
