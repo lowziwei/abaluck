@@ -10,7 +10,8 @@ START_YEAR = 2018
 END_YEAR = 2024
 DATASET_TYPE = "COMMERCIAL_SET_A"
 DATABASE = "CCAE"
-DIAGNOSIS_CUTOFF_DATE = '2021-06-01'  # Only check diagnoses before this date
+DIAGNOSIS_CUTOFF_DATE = '2021-06-01'
+AGE_CUTOFF_YEAR = 2002  # Born in 2002 or earlier = 18+ by June 2021
 
 def load_nonzero_diagnosis_codes():
     """
@@ -30,6 +31,7 @@ def load_nonzero_diagnosis_codes():
     print(f"  Diabetes codes (non-zero): {len(diabetes_codes)}")
     print(f"  Obesity codes (non-zero): {len(obesity_codes)}")
     print(f"  Diagnosis cutoff date: {DIAGNOSIS_CUTOFF_DATE}")
+    print(f"  Age filter: DOBYR <= {AGE_CUTOFF_YEAR} (18+ by June 2021)")
     
     return diabetes_codes, obesity_codes
 
@@ -50,8 +52,9 @@ def extract_diagnosis_flags_for_patients(patient_ids, year, diabetes_codes, obes
     """
     Extract diagnosis eligibility flags for a set of patients
     Checks only inpatient file for diagnosis codes BEFORE June 2021
+    Filters to patients 18+ years old by June 2021
     """
-    print(f"     Checking diagnosis codes for {len(patient_ids):,} patients (pre-June 2021 only)...")
+    print(f"     Checking diagnosis codes for {len(patient_ids):,} patients (pre-June 2021, age 18+ only)...")
     
     conn = setup_duckdb_connection()
     
@@ -76,11 +79,12 @@ def extract_diagnosis_flags_for_patients(patient_ids, year, diabetes_codes, obes
             result['d_diagnosis_eligible_obes'] = 0
             return result
         
-        print(f"     Checking inpatient file (pre-{DIAGNOSIS_CUTOFF_DATE})...")
+        print(f"     Checking inpatient file (pre-{DIAGNOSIS_CUTOFF_DATE}, DOBYR<={AGE_CUTOFF_YEAR})...")
         
         # Query to find patients with diabetes or obesity codes
-        # Inpatient has PDX, DX1-DX15
-        # CRITICAL: Filter by ADMDATE < DIAGNOSIS_CUTOFF_DATE
+        # CRITICAL FILTERS:
+        # 1. ADMDATE < DIAGNOSIS_CUTOFF_DATE (pre-June 2021 diagnoses)
+        # 2. DOBYR <= AGE_CUTOFF_YEAR (18+ by June 2021)
         diagnosis_query = f"""
         WITH diagnosis_data AS (
             SELECT DISTINCT
@@ -124,6 +128,7 @@ def extract_diagnosis_flags_for_patients(patient_ids, year, diabetes_codes, obes
             FROM '{inpatient_file}'
             WHERE ENROLID IN (SELECT ENROLID FROM target_patients)
             AND ADMDATE < DATE '{DIAGNOSIS_CUTOFF_DATE}'
+            AND DOBYR <= {AGE_CUTOFF_YEAR}
         ),
         patient_flags AS (
             SELECT 
@@ -265,7 +270,7 @@ def main():
     Main function
     """
     print("=" * 60)
-    print("ADD DIAGNOSIS ELIGIBILITY FLAGS (PRE-JUNE 2021 BASELINE)")
+    print("ADD DIAGNOSIS ELIGIBILITY FLAGS (PRE-JUNE 2021, AGE 18+)")
     print("=" * 60)
     
     diabetes_codes, obesity_codes = load_nonzero_diagnosis_codes()
@@ -277,6 +282,7 @@ def main():
     print(f"\nProcessing years {START_YEAR} to {END_YEAR}")
     print("Checking inpatient file only (CCAE_I.parquet)")
     print(f"Using BASELINE diagnoses: ADMDATE < {DIAGNOSIS_CUTOFF_DATE}")
+    print(f"Age filter: DOBYR <= {AGE_CUTOFF_YEAR} (18+ by June 2021)")
     print("=" * 60)
     
     total_start_time = time.time()
