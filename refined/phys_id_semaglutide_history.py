@@ -10,6 +10,18 @@ def process_single_file(file):
     print(f"  Processing: {os.path.basename(file)}")
     df = pd.read_parquet(file)
     
+    # Debug: Print columns
+    print(f"    Columns in file: {df.columns.tolist()}")
+    print(f"    Rows in file: {len(df):,}")
+    
+    # Check for required columns
+    required_cols = ['phys_ids', 'SVCDATE', 'ENROLID', 'NDCNUM', 'd_semaglutide', 
+                     'd_diagnosis_eligible_diab', 'd_diagnosis_eligible_obes']
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
+    
     # ===== DAILY AGGREGATION =====
     daily_results = df.groupby(['phys_ids', 'SVCDATE']).agg({
         'ENROLID': 'nunique',
@@ -83,10 +95,11 @@ def main():
     print("PHYSICIAN SEMAGLUTIDE ANALYSIS - MEMORY-EFFICIENT AGGREGATION")
     print("=" * 60)
     
-    parquet_files = glob.glob("prescription_events_*_with_ndcnum_with_diagnosis.parquet")
+    parquet_files = glob.glob("prescription_events_????_??_with_ndcnum_with_diagnosis.parquet")
     
     if not parquet_files:
-        print("No files with diagnosis data found!")
+        print("No monthly files with diagnosis data found!")
+        print("Looking for pattern: prescription_events_YYYY_MM_with_ndcnum_with_diagnosis.parquet")
         return
     
     print(f"Found {len(parquet_files)} files to process\n")
