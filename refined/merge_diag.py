@@ -10,6 +10,7 @@ START_YEAR = 2018
 END_YEAR = 2024
 DATASET_TYPE = "COMMERCIAL_SET_A"
 DATABASE = "CCAE"
+DIAGNOSIS_CUTOFF_DATE = '2021-06-01'  # Only check diagnoses before this date
 
 def load_nonzero_diagnosis_codes():
     """
@@ -28,6 +29,7 @@ def load_nonzero_diagnosis_codes():
     print(f"Loaded diagnosis codes from {csv_path}")
     print(f"  Diabetes codes (non-zero): {len(diabetes_codes)}")
     print(f"  Obesity codes (non-zero): {len(obesity_codes)}")
+    print(f"  Diagnosis cutoff date: {DIAGNOSIS_CUTOFF_DATE}")
     
     return diabetes_codes, obesity_codes
 
@@ -47,9 +49,9 @@ def setup_duckdb_connection(memory_limit='8GB'):
 def extract_diagnosis_flags_for_patients(patient_ids, year, diabetes_codes, obesity_codes):
     """
     Extract diagnosis eligibility flags for a set of patients
-    Checks only inpatient file for diagnosis codes
+    Checks only inpatient file for diagnosis codes BEFORE June 2021
     """
-    print(f"     Checking diagnosis codes for {len(patient_ids):,} patients...")
+    print(f"     Checking diagnosis codes for {len(patient_ids):,} patients (pre-June 2021 only)...")
     
     conn = setup_duckdb_connection()
     
@@ -74,10 +76,11 @@ def extract_diagnosis_flags_for_patients(patient_ids, year, diabetes_codes, obes
             result['d_diagnosis_eligible_obes'] = 0
             return result
         
-        print(f"     Checking inpatient file...")
+        print(f"     Checking inpatient file (pre-{DIAGNOSIS_CUTOFF_DATE})...")
         
         # Query to find patients with diabetes or obesity codes
         # Inpatient has PDX, DX1-DX15
+        # CRITICAL: Filter by ADMDATE < DIAGNOSIS_CUTOFF_DATE
         diagnosis_query = f"""
         WITH diagnosis_data AS (
             SELECT DISTINCT
@@ -120,6 +123,7 @@ def extract_diagnosis_flags_for_patients(patient_ids, year, diabetes_codes, obes
                 ) THEN 1 ELSE 0 END as has_obesity
             FROM '{inpatient_file}'
             WHERE ENROLID IN (SELECT ENROLID FROM target_patients)
+            AND ADMDATE < DATE '{DIAGNOSIS_CUTOFF_DATE}'
         ),
         patient_flags AS (
             SELECT 
@@ -230,8 +234,7 @@ def process_year(year, diabetes_codes, obesity_codes):
     print("=" * 50)
     
     patterns = [
-        f"prescription_events_{year}_*_with_ndcnum.parquet",
-        f"prescription_events_{year}_*.parquet"
+        f"prescription_events_{year}_*_with_ndcnum.parquet"
     ]
     
     events_files = []
@@ -262,7 +265,7 @@ def main():
     Main function
     """
     print("=" * 60)
-    print("ADD DIAGNOSIS ELIGIBILITY FLAGS (INPATIENT ONLY)")
+    print("ADD DIAGNOSIS ELIGIBILITY FLAGS (PRE-JUNE 2021 BASELINE)")
     print("=" * 60)
     
     diabetes_codes, obesity_codes = load_nonzero_diagnosis_codes()
@@ -273,6 +276,7 @@ def main():
     
     print(f"\nProcessing years {START_YEAR} to {END_YEAR}")
     print("Checking inpatient file only (CCAE_I.parquet)")
+    print(f"Using BASELINE diagnoses: ADMDATE < {DIAGNOSIS_CUTOFF_DATE}")
     print("=" * 60)
     
     total_start_time = time.time()
