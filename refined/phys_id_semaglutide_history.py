@@ -2,138 +2,143 @@ import pandas as pd
 import glob
 import os
 
-def aggregate_to_physician_level():
+def process_single_file(file):
     """
-    Step 1: Aggregate prescription events to physician-date level
+    Process a single file and return both daily and monthly aggregations
+    This ensures we only read each file once
     """
-    print("STEP 1: PHYSICIAN-DATE AGGREGATION")
+    print(f"  Processing: {os.path.basename(file)}")
+    df = pd.read_parquet(file)
+    
+    # ===== DAILY AGGREGATION =====
+    daily_results = df.groupby(['phys_ids', 'SVCDATE']).agg({
+        'ENROLID': 'nunique',
+        'NDCNUM': 'count',
+        'd_semaglutide': 'sum'
+    }).reset_index()
+    daily_results.columns = ['phys_ids', 'SVCDATE', 'total_patients', 'total_prescriptions', 'semaglutide_prescriptions']
+    
+    # Daily eligible patients
+    eligible_daily = df[
+        (df['d_diagnosis_eligible_diab'] == 1) | (df['d_diagnosis_eligible_obes'] == 1)
+    ].groupby(['phys_ids', 'SVCDATE'])['ENROLID'].nunique().reset_index()
+    eligible_daily.columns = ['phys_ids', 'SVCDATE', 'eligible_patients']
+    daily_results = daily_results.merge(eligible_daily, on=['phys_ids', 'SVCDATE'], how='left')
+    daily_results['eligible_patients'] = daily_results['eligible_patients'].fillna(0).astype(int)
+    
+    # Daily semaglutide patients
+    sema_daily = df[df['d_semaglutide'] == 1].groupby(['phys_ids', 'SVCDATE'])['ENROLID'].nunique().reset_index()
+    sema_daily.columns = ['phys_ids', 'SVCDATE', 'semaglutide_patients']
+    daily_results = daily_results.merge(sema_daily, on=['phys_ids', 'SVCDATE'], how='left')
+    daily_results['semaglutide_patients'] = daily_results['semaglutide_patients'].fillna(0).astype(int)
+    
+    # ===== MONTHLY AGGREGATION =====
+    df['SVCDATE'] = pd.to_datetime(df['SVCDATE'])
+    df['year_month'] = df['SVCDATE'].dt.to_period('M')
+    
+    monthly_results = df.groupby(['phys_ids', 'year_month']).agg({
+        'ENROLID': 'nunique',
+        'NDCNUM': 'count',
+        'd_semaglutide': 'sum',
+        'SVCDATE': 'nunique'
+    }).reset_index()
+    monthly_results.columns = ['phys_ids', 'year_month', 'total_patients', 'total_prescriptions', 
+                               'semaglutide_prescriptions', 'service_dates_count']
+    
+    # Monthly eligible patients
+    eligible_monthly = df[
+        (df['d_diagnosis_eligible_diab'] == 1) | (df['d_diagnosis_eligible_obes'] == 1)
+    ].groupby(['phys_ids', 'year_month'])['ENROLID'].nunique().reset_index()
+    eligible_monthly.columns = ['phys_ids', 'year_month', 'eligible_patients']
+    monthly_results = monthly_results.merge(eligible_monthly, on=['phys_ids', 'year_month'], how='left')
+    monthly_results['eligible_patients'] = monthly_results['eligible_patients'].fillna(0).astype(int)
+    
+    # Monthly semaglutide patients
+    sema_monthly = df[df['d_semaglutide'] == 1].groupby(['phys_ids', 'year_month'])['ENROLID'].nunique().reset_index()
+    sema_monthly.columns = ['phys_ids', 'year_month', 'semaglutide_patients']
+    monthly_results = monthly_results.merge(sema_monthly, on=['phys_ids', 'year_month'], how='left')
+    monthly_results['semaglutide_patients'] = monthly_results['semaglutide_patients'].fillna(0).astype(int)
+    
+    # Monthly eligible semaglutide patients
+    eligible_sema = df[
+        ((df['d_diagnosis_eligible_diab'] == 1) | (df['d_diagnosis_eligible_obes'] == 1)) & 
+        (df['d_semaglutide'] == 1)
+    ].groupby(['phys_ids', 'year_month'])['ENROLID'].nunique().reset_index()
+    eligible_sema.columns = ['phys_ids', 'year_month', 'semaglutide_in_eligible']
+    monthly_results = monthly_results.merge(eligible_sema, on=['phys_ids', 'year_month'], how='left')
+    monthly_results['semaglutide_in_eligible'] = monthly_results['semaglutide_in_eligible'].fillna(0).astype(int)
+    
+    # Clear the dataframe from memory
+    del df
+    
+    return daily_results, monthly_results
+
+def main():
+    """
+    Memory-efficient aggregation pipeline:
+    - Read each file only once
+    - Compute both daily and monthly aggregations per file
+    - Store only aggregated results (much smaller than raw data)
+    """
+    print("PHYSICIAN SEMAGLUTIDE ANALYSIS - MEMORY-EFFICIENT AGGREGATION")
     print("=" * 60)
     
     parquet_files = glob.glob("prescription_events_*_with_ndcnum_with_diagnosis.parquet")
     
     if not parquet_files:
         print("No files with diagnosis data found!")
-        return None, None
+        return
     
-    print(f"Found {len(parquet_files)} files to process")
+    print(f"Found {len(parquet_files)} files to process\n")
     
-    all_results = []
+    all_daily = []
+    all_monthly = []
     
+    # Process each file once, computing both aggregations
     for file in sorted(parquet_files):
-        print(f"  Processing: {os.path.basename(file)}")
-        df = pd.read_parquet(file)
-        
-        # Group by physician and date
-        results = df.groupby(['phys_ids', 'SVCDATE']).agg({
-            'ENROLID': 'nunique',
-            'NDCNUM': 'count',
-            'd_semaglutide': 'sum'
-        }).reset_index()
-        
-        results.columns = ['phys_ids', 'SVCDATE', 'total_patients', 'total_prescriptions', 'semaglutide_prescriptions']
-        
-        # Count eligible patients (diabetes OR obesity)
-        eligible_patients = df[
-            (df['d_diagnosis_eligible_diab'] == 1) | (df['d_diagnosis_eligible_obes'] == 1)
-        ].groupby(['phys_ids', 'SVCDATE'])['ENROLID'].nunique().reset_index()
-        eligible_patients.columns = ['phys_ids', 'SVCDATE', 'eligible_patients']
-        
-        results = results.merge(eligible_patients, on=['phys_ids', 'SVCDATE'], how='left')
-        results['eligible_patients'] = results['eligible_patients'].fillna(0).astype(int)
-        
-        # Count semaglutide patients
-        sema_patients = df[df['d_semaglutide'] == 1].groupby(['phys_ids', 'SVCDATE'])['ENROLID'].nunique().reset_index()
-        sema_patients.columns = ['phys_ids', 'SVCDATE', 'semaglutide_patients']
-        
-        results = results.merge(sema_patients, on=['phys_ids', 'SVCDATE'], how='left')
-        results['semaglutide_patients'] = results['semaglutide_patients'].fillna(0).astype(int)
-        
-        all_results.append(results)
+        daily, monthly = process_single_file(file)
+        all_daily.append(daily)
+        all_monthly.append(monthly)
     
-    # Combine all files
-    final_df = pd.concat(all_results, ignore_index=True)
+    # ===== COMBINE DAILY RESULTS =====
+    print("\nCombining daily results...")
+    daily_combined = pd.concat(all_daily, ignore_index=True)
+    del all_daily  # Free memory
     
     # Aggregate any physician-date combinations split across files
-    combined_df = final_df.groupby(['phys_ids', 'SVCDATE']).agg({
+    daily_final = daily_combined.groupby(['phys_ids', 'SVCDATE']).agg({
         'total_patients': 'sum',
         'total_prescriptions': 'sum',
         'semaglutide_prescriptions': 'sum',
         'semaglutide_patients': 'sum',
         'eligible_patients': 'sum'
     }).reset_index()
+    del daily_combined  # Free memory
     
     # Calculate fractions
-    combined_df['fraction_prescriptions_semaglutide'] = combined_df['semaglutide_prescriptions'] / combined_df['total_prescriptions']
-    combined_df['fraction_patients_eligible'] = combined_df['eligible_patients'] / combined_df['total_patients']
+    daily_final['fraction_prescriptions_semaglutide'] = (
+        daily_final['semaglutide_prescriptions'] / daily_final['total_prescriptions']
+    ).fillna(0)
+    daily_final['fraction_patients_eligible'] = (
+        daily_final['eligible_patients'] / daily_final['total_patients']
+    ).fillna(0)
     
-    print(f"\nPhysician-date level complete:")
-    print(f"  Unique physician-date combinations: {len(combined_df):,}")
-    print(f"  Total prescriptions: {combined_df['total_prescriptions'].sum():,}")
+    print(f"Daily aggregation complete:")
+    print(f"  Unique physician-date combinations: {len(daily_final):,}")
+    print(f"  Total prescriptions: {daily_final['total_prescriptions'].sum():,}")
     
-    return combined_df, parquet_files
-
-def aggregate_to_monthly_level(parquet_files):
-    """
-    Step 2: Aggregate prescription events directly to physician-month level
-    This avoids double-counting patients who appear on multiple dates
-    """
-    print("\nSTEP 2: PHYSICIAN-MONTH AGGREGATION")
-    print("=" * 60)
+    # Save daily results
+    daily_final.to_parquet("physician_semaglutide_analysis_with_diagnosis.parquet", compression='snappy')
+    print(f"  Saved: physician_semaglutide_analysis_with_diagnosis.parquet")
+    del daily_final  # Free memory
     
-    all_monthly = []
-    
-    for file in sorted(parquet_files):
-        print(f"  Processing: {os.path.basename(file)}")
-        df = pd.read_parquet(file)
-        
-        # Convert to datetime and create year-month period
-        df['SVCDATE'] = pd.to_datetime(df['SVCDATE'])
-        df['year_month'] = df['SVCDATE'].dt.to_period('M')
-        
-        # Basic aggregation - unique patients and counts per physician-month
-        monthly = df.groupby(['phys_ids', 'year_month']).agg({
-            'ENROLID': 'nunique',      # Unique patients per month
-            'NDCNUM': 'count',          # Total prescriptions
-            'd_semaglutide': 'sum',     # Semaglutide prescriptions
-            'SVCDATE': 'nunique'        # Number of service dates
-        }).reset_index()
-        
-        monthly.columns = ['phys_ids', 'year_month', 'total_patients', 'total_prescriptions', 
-                          'semaglutide_prescriptions', 'service_dates_count']
-        
-        # Count unique eligible patients per month (diabetes OR obesity)
-        eligible_patients = df[
-            (df['d_diagnosis_eligible_diab'] == 1) | (df['d_diagnosis_eligible_obes'] == 1)
-        ].groupby(['phys_ids', 'year_month'])['ENROLID'].nunique().reset_index()
-        eligible_patients.columns = ['phys_ids', 'year_month', 'eligible_patients']
-        
-        monthly = monthly.merge(eligible_patients, on=['phys_ids', 'year_month'], how='left')
-        monthly['eligible_patients'] = monthly['eligible_patients'].fillna(0).astype(int)
-        
-        # Count unique semaglutide patients per month
-        sema_patients = df[df['d_semaglutide'] == 1].groupby(['phys_ids', 'year_month'])['ENROLID'].nunique().reset_index()
-        sema_patients.columns = ['phys_ids', 'year_month', 'semaglutide_patients']
-        
-        monthly = monthly.merge(sema_patients, on=['phys_ids', 'year_month'], how='left')
-        monthly['semaglutide_patients'] = monthly['semaglutide_patients'].fillna(0).astype(int)
-        
-        # Count unique patients who are both eligible AND got semaglutide
-        eligible_sema_patients = df[
-            ((df['d_diagnosis_eligible_diab'] == 1) | (df['d_diagnosis_eligible_obes'] == 1)) & 
-            (df['d_semaglutide'] == 1)
-        ].groupby(['phys_ids', 'year_month'])['ENROLID'].nunique().reset_index()
-        eligible_sema_patients.columns = ['phys_ids', 'year_month', 'semaglutide_in_eligible']
-        
-        monthly = monthly.merge(eligible_sema_patients, on=['phys_ids', 'year_month'], how='left')
-        monthly['semaglutide_in_eligible'] = monthly['semaglutide_in_eligible'].fillna(0).astype(int)
-        
-        all_monthly.append(monthly)
-    
-    # Combine all files
-    final_monthly = pd.concat(all_monthly, ignore_index=True)
+    # ===== COMBINE MONTHLY RESULTS =====
+    print("\nCombining monthly results...")
+    monthly_combined = pd.concat(all_monthly, ignore_index=True)
+    del all_monthly  # Free memory
     
     # Aggregate any physician-month combinations split across files
-    combined_monthly = final_monthly.groupby(['phys_ids', 'year_month']).agg({
+    monthly_final = monthly_combined.groupby(['phys_ids', 'year_month']).agg({
         'total_patients': 'sum',
         'total_prescriptions': 'sum',
         'semaglutide_prescriptions': 'sum',
@@ -142,27 +147,26 @@ def aggregate_to_monthly_level(parquet_files):
         'semaglutide_in_eligible': 'sum',
         'service_dates_count': 'sum'
     }).reset_index()
+    del monthly_combined  # Free memory
     
     # Add year and month columns
-    combined_monthly['year'] = combined_monthly['year_month'].apply(lambda x: x.year)
-    combined_monthly['month'] = combined_monthly['year_month'].apply(lambda x: x.month)
-    combined_monthly['year_month'] = combined_monthly['year_month'].astype(str)
+    monthly_final['year'] = monthly_final['year_month'].apply(lambda x: x.year)
+    monthly_final['month'] = monthly_final['year_month'].apply(lambda x: x.month)
+    monthly_final['year_month'] = monthly_final['year_month'].astype(str)
     
     # Calculate fractions
-    combined_monthly['fraction_patients_eligible'] = (
-        combined_monthly['eligible_patients'] / combined_monthly['total_patients']
+    monthly_final['fraction_patients_eligible'] = (
+        monthly_final['eligible_patients'] / monthly_final['total_patients']
     ).fillna(0)
-    
-    combined_monthly['fraction_prescriptions_semaglutide'] = (
-        combined_monthly['semaglutide_prescriptions'] / combined_monthly['total_prescriptions']
+    monthly_final['fraction_prescriptions_semaglutide'] = (
+        monthly_final['semaglutide_prescriptions'] / monthly_final['total_prescriptions']
     ).fillna(0)
-    
-    combined_monthly['fraction_eligible_get_semaglutide'] = (
-        combined_monthly['semaglutide_in_eligible'] / combined_monthly['eligible_patients']
+    monthly_final['fraction_eligible_get_semaglutide'] = (
+        monthly_final['semaglutide_in_eligible'] / monthly_final['eligible_patients']
     ).fillna(0)
     
     # Reorder columns
-    combined_monthly = combined_monthly[[
+    monthly_final = monthly_final[[
         'phys_ids', 'year_month', 'year', 'month', 'service_dates_count',
         'total_patients', 'total_prescriptions', 'eligible_patients',
         'semaglutide_prescriptions', 'semaglutide_patients', 'semaglutide_in_eligible',
@@ -170,47 +174,20 @@ def aggregate_to_monthly_level(parquet_files):
         'fraction_eligible_get_semaglutide'
     ]]
     
-    combined_monthly = combined_monthly.sort_values(['phys_ids', 'year', 'month']).reset_index(drop=True)
+    monthly_final = monthly_final.sort_values(['phys_ids', 'year', 'month']).reset_index(drop=True)
     
-    print(f"\nPhysician-month level complete:")
-    print(f"  Monthly physician combinations: {len(combined_monthly):,}")
-    print(f"  Unique physicians: {combined_monthly['phys_ids'].nunique():,}")
-    print(f"  Total prescriptions: {combined_monthly['total_prescriptions'].sum():,}")
-    print(f"  Unique patients (total across all months): {combined_monthly['total_patients'].sum():,}")
-    print(f"  Eligible patients (total across all months): {combined_monthly['eligible_patients'].sum():,}")
+    print(f"Monthly aggregation complete:")
+    print(f"  Monthly physician combinations: {len(monthly_final):,}")
+    print(f"  Unique physicians: {monthly_final['phys_ids'].nunique():,}")
+    print(f"  Total prescriptions: {monthly_final['total_prescriptions'].sum():,}")
     
-    return combined_monthly
-
-def main():
-    """
-    Combined aggregation pipeline:
-    1. Aggregate individual prescription events to physician-date level
-    2. Aggregate prescription events directly to physician-month level
-    """
-    print("PHYSICIAN SEMAGLUTIDE ANALYSIS - COMBINED AGGREGATION")
-    print("=" * 60)
+    # Save monthly results
+    monthly_final.to_parquet("physician_monthly_semaglutide_with_eligibility.parquet", compression='snappy')
+    monthly_final.to_csv("physician_monthly_semaglutide_with_eligibility.csv", index=False)
+    print(f"  Saved: physician_monthly_semaglutide_with_eligibility.parquet")
+    print(f"  Saved: physician_monthly_semaglutide_with_eligibility.csv")
     
-    # Step 1: Physician-date level
-    physician_date_df, parquet_files = aggregate_to_physician_level()
-    
-    if physician_date_df is None:
-        return
-    
-    # Save physician-date level
-    physician_date_df.to_parquet("physician_semaglutide_analysis_with_diagnosis.parquet", compression='snappy')
-    print(f"\nSaved: physician_semaglutide_analysis_with_diagnosis.parquet")
-    
-    # Step 2: Physician-month level (directly from event data)
-    monthly_df = aggregate_to_monthly_level(parquet_files)
-    
-    # Save monthly level
-    monthly_df.to_parquet("physician_monthly_semaglutide_with_eligibility.parquet", compression='snappy')
-    monthly_df.to_csv("physician_monthly_semaglutide_with_eligibility.csv", index=False)
-    
-    print(f"\nSaved: physician_monthly_semaglutide_with_eligibility.parquet")
-    print(f"Saved: physician_monthly_semaglutide_with_eligibility.csv")
-    
-    print(f"\nCOMPLETE!")
+    print(f"\n✓ COMPLETE!")
 
 if __name__ == "__main__":
     main()
