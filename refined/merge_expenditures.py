@@ -5,10 +5,12 @@ import time
 from pathlib import Path
 
 # Configuration
-STUDY_START_DATE = '2021-06-01'
-STUDY_END_DATE = '2023-06-30'
 DATASET_TYPE = "COMMERCIAL_SET_A"
 DATABASE = "CCAE"
+PERIOD1_START = '2021-06-01'
+PERIOD1_END = '2022-05-31'
+PERIOD2_START = '2022-06-01'
+PERIOD2_END = '2023-05-31'
 
 def setup_duckdb_connection(memory_limit='8GB'):
     """
@@ -23,179 +25,154 @@ def setup_duckdb_connection(memory_limit='8GB'):
     conn.execute("SET enable_progress_bar=false")
     return conn
 
-def extract_expenditures_for_patient_dates(patient_dates, chunk_size=200000):
+def extract_patient_expenditures(patient_ids, period_start, period_end, period_name):
     """
-    MEMORY-OPTIMIZED: Extract expenditures in chunks to handle large patient-date lists
-    
-    Instead of querying with all patient-dates at once (memory-intensive),
-    processes in smaller chunks for better memory efficiency.
+    Extract total expenditures per patient for a specific time period
+    Aggregates ALL expenditures for each patient during the period
     
     Parameters:
     -----------
-    patient_dates : DataFrame with columns ['ENROLID', 'SVCDATE']
-    chunk_size : int - Number of patient-dates to process at a time (default 200k)
+    patient_ids : set - Patient IDs to query
+    period_start : str - Start date (YYYY-MM-DD)
+    period_end : str - End date (YYYY-MM-DD)
+    period_name : str - Name for logging (e.g., "Period 1")
     
     Returns:
     --------
-    DataFrame with columns: ENROLID, SVCDATE, inpatient_pay, outpatient_pay, drug_pay, total_pay
+    DataFrame with columns: ENROLID, inpatient_pay, outpatient_pay, drug_pay, total_pay
     """
-    print(f"    Extracting expenditures for {len(patient_dates):,} patient-date pairs...")
+    print(f"    Extracting expenditures for {len(patient_ids):,} patients")
+    print(f"    Period: {period_start} to {period_end}")
     
-    # If small enough, process in one go
-    if len(patient_dates) <= chunk_size:
-        print(f"      Processing in single batch (small enough)")
-        return _extract_expenditures_chunk(patient_dates)
-    
-    # Otherwise, process in chunks
-    print(f"      Processing in chunks of {chunk_size:,} (memory-optimized)")
-    num_chunks = (len(patient_dates) + chunk_size - 1) // chunk_size
-    
-    all_results = []
-    for i in range(0, len(patient_dates), chunk_size):
-        chunk_num = i // chunk_size + 1
-        chunk = patient_dates.iloc[i:i+chunk_size]
-        print(f"      Chunk {chunk_num}/{num_chunks}: {len(chunk):,} patient-dates")
-        
-        result_chunk = _extract_expenditures_chunk(chunk)
-        all_results.append(result_chunk)
-        
-        # Clean up between chunks
-        import gc
-        gc.collect()
-    
-    # Combine all chunks
-    print(f"      Combining {len(all_results)} chunks...")
-    final_result = pd.concat(all_results, ignore_index=True)
-    
-    return final_result
-
-def _extract_expenditures_chunk(patient_dates):
-    """
-    Extract expenditures for a single chunk of patient-dates
-    """
     conn = setup_duckdb_connection()
     
     try:
-        conn.register('target_patient_dates', patient_dates)
+        # Create patient lookup
+        patients_df = pd.DataFrame({'ENROLID': list(patient_ids)})
+        conn.register('target_patients', patients_df)
+        
         data_path = f"/data/MarketScan_data/{DATASET_TYPE}"
         
-        # Get unique patients to make queries more efficient
-        unique_patients = patient_dates['ENROLID'].unique().tolist()
-        patients_str = "', '".join(map(str, unique_patients))
+        # Determine which years to query based on period
+        period_start_dt = pd.to_datetime(period_start)
+        period_end_dt = pd.to_datetime(period_end)
+        years_to_query = list(range(period_start_dt.year, period_end_dt.year + 1))
+        print(f"      Years to query: {years_to_query}")
         
-        # Extract inpatient expenditures (TOTNET)
+        # Extract inpatient expenditures (TOTNET) - aggregate by patient
+        print(f"      Querying inpatient...")
+        inpatient_dfs = []
         inpatient_file = f"{data_path}/{DATABASE}_I.parquet"
         if Path(inpatient_file).exists():
-            # Two-stage filter: first by ENROLID (fast), then by exact date pairs
             inpatient_query = f"""
-            WITH filtered_data AS (
-                SELECT 
-                    ENROLID,
-                    ADMDATE as SVCDATE,
-                    TOTNET
-                FROM '{inpatient_file}'
-                WHERE ENROLID IN ('{patients_str}')
-                AND ADMDATE >= DATE '{STUDY_START_DATE}'
-                AND ADMDATE <= DATE '{STUDY_END_DATE}'
-            )
             SELECT 
-                f.ENROLID,
-                f.SVCDATE,
-                SUM(COALESCE(f.TOTNET, 0)) as inpatient_pay
-            FROM filtered_data f
-            INNER JOIN target_patient_dates t 
-                ON f.ENROLID = t.ENROLID AND f.SVCDATE = t.SVCDATE
-            GROUP BY f.ENROLID, f.SVCDATE
+                ENROLID,
+                SUM(COALESCE(TOTNET, 0)) as inpatient_pay
+            FROM '{inpatient_file}'
+            WHERE ENROLID IN (SELECT ENROLID FROM target_patients)
+            AND ADMDATE >= DATE '{period_start}'
+            AND ADMDATE <= DATE '{period_end}'
+            GROUP BY ENROLID
             """
-            inpatient_df = conn.execute(inpatient_query).fetchdf()
-        else:
-            inpatient_df = pd.DataFrame(columns=['ENROLID', 'SVCDATE', 'inpatient_pay'])
+            inpatient_dfs.append(conn.execute(inpatient_query).fetchdf())
         
-        # Extract outpatient expenditures (NETPAY)
-        outpatient_file = f"{data_path}/{DATABASE}_O.parquet"
-        if Path(outpatient_file).exists():
-            outpatient_query = f"""
-            WITH filtered_data AS (
+        if inpatient_dfs:
+            inpatient_df = pd.concat(inpatient_dfs, ignore_index=True)
+            inpatient_df = inpatient_df.groupby('ENROLID', as_index=False)['inpatient_pay'].sum()
+            print(f"        {len(inpatient_df):,} patients with inpatient claims, ${inpatient_df['inpatient_pay'].sum():,.2f} total")
+        else:
+            inpatient_df = pd.DataFrame(columns=['ENROLID', 'inpatient_pay'])
+            print(f"        No inpatient data found")
+        
+        # Extract outpatient expenditures (NETPAY) - aggregate by patient across years
+        print(f"      Querying outpatient...")
+        outpatient_dfs = []
+        for year in years_to_query:
+            outpatient_file = f"{data_path}/{DATABASE}_O_{year}.parquet"
+            if Path(outpatient_file).exists():
+                print(f"        Reading {DATABASE}_O_{year}.parquet...")
+                outpatient_query = f"""
                 SELECT 
                     ENROLID,
-                    SVCDATE,
-                    NETPAY
+                    SUM(COALESCE(NETPAY, 0)) as outpatient_pay
                 FROM '{outpatient_file}'
-                WHERE ENROLID IN ('{patients_str}')
-                AND SVCDATE >= DATE '{STUDY_START_DATE}'
-                AND SVCDATE <= DATE '{STUDY_END_DATE}'
-            )
-            SELECT 
-                f.ENROLID,
-                f.SVCDATE,
-                SUM(COALESCE(f.NETPAY, 0)) as outpatient_pay
-            FROM filtered_data f
-            INNER JOIN target_patient_dates t 
-                ON f.ENROLID = t.ENROLID AND f.SVCDATE = t.SVCDATE
-            GROUP BY f.ENROLID, f.SVCDATE
-            """
-            outpatient_df = conn.execute(outpatient_query).fetchdf()
-        else:
-            outpatient_df = pd.DataFrame(columns=['ENROLID', 'SVCDATE', 'outpatient_pay'])
+                WHERE ENROLID IN (SELECT ENROLID FROM target_patients)
+                AND SVCDATE >= DATE '{period_start}'
+                AND SVCDATE <= DATE '{period_end}'
+                GROUP BY ENROLID
+                """
+                outpatient_dfs.append(conn.execute(outpatient_query).fetchdf())
         
-        # Extract drug expenditures (NETPAY)
-        drug_file = f"{data_path}/{DATABASE}_D.parquet"
-        if Path(drug_file).exists():
-            drug_query = f"""
-            WITH filtered_data AS (
+        if outpatient_dfs:
+            outpatient_df = pd.concat(outpatient_dfs, ignore_index=True)
+            outpatient_df = outpatient_df.groupby('ENROLID', as_index=False)['outpatient_pay'].sum()
+            print(f"        {len(outpatient_df):,} patients with outpatient claims, ${outpatient_df['outpatient_pay'].sum():,.2f} total")
+        else:
+            outpatient_df = pd.DataFrame(columns=['ENROLID', 'outpatient_pay'])
+            print(f"        No outpatient data found")
+        
+        # Extract drug expenditures (NETPAY) - aggregate by patient across years
+        print(f"      Querying drug...")
+        drug_dfs = []
+        for year in years_to_query:
+            drug_file = f"{data_path}/{DATABASE}_D_{year}.parquet"
+            if Path(drug_file).exists():
+                print(f"        Reading {DATABASE}_D_{year}.parquet...")
+                drug_query = f"""
                 SELECT 
                     ENROLID,
-                    SVCDATE,
-                    NETPAY
+                    SUM(COALESCE(NETPAY, 0)) as drug_pay
                 FROM '{drug_file}'
-                WHERE ENROLID IN ('{patients_str}')
-                AND SVCDATE >= DATE '{STUDY_START_DATE}'
-                AND SVCDATE <= DATE '{STUDY_END_DATE}'
-            )
-            SELECT 
-                f.ENROLID,
-                f.SVCDATE,
-                SUM(COALESCE(f.NETPAY, 0)) as drug_pay
-            FROM filtered_data f
-            INNER JOIN target_patient_dates t 
-                ON f.ENROLID = t.ENROLID AND f.SVCDATE = t.SVCDATE
-            GROUP BY f.ENROLID, f.SVCDATE
-            """
-            drug_df = conn.execute(drug_query).fetchdf()
-        else:
-            drug_df = pd.DataFrame(columns=['ENROLID', 'SVCDATE', 'drug_pay'])
+                WHERE ENROLID IN (SELECT ENROLID FROM target_patients)
+                AND SVCDATE >= DATE '{period_start}'
+                AND SVCDATE <= DATE '{period_end}'
+                GROUP BY ENROLID
+                """
+                drug_dfs.append(conn.execute(drug_query).fetchdf())
         
-        # Merge expenditures
+        if drug_dfs:
+            drug_df = pd.concat(drug_dfs, ignore_index=True)
+            drug_df = drug_df.groupby('ENROLID', as_index=False)['drug_pay'].sum()
+            print(f"        {len(drug_df):,} patients with drug claims, ${drug_df['drug_pay'].sum():,.2f} total")
+        else:
+            drug_df = pd.DataFrame(columns=['ENROLID', 'drug_pay'])
+            print(f"        No drug data found")
+        
+        # Merge all expenditures by patient
         conn.register('inpatient_exp', inpatient_df)
         conn.register('outpatient_exp', outpatient_df)
         conn.register('drug_exp', drug_df)
         
         merge_query = """
         SELECT 
-            pd.ENROLID,
-            pd.SVCDATE,
+            tp.ENROLID,
             COALESCE(i.inpatient_pay, 0) as inpatient_pay,
             COALESCE(o.outpatient_pay, 0) as outpatient_pay,
             COALESCE(d.drug_pay, 0) as drug_pay,
             COALESCE(i.inpatient_pay, 0) + COALESCE(o.outpatient_pay, 0) + COALESCE(d.drug_pay, 0) as total_pay
-        FROM target_patient_dates pd
-        LEFT JOIN inpatient_exp i ON pd.ENROLID = i.ENROLID AND pd.SVCDATE = i.SVCDATE
-        LEFT JOIN outpatient_exp o ON pd.ENROLID = o.ENROLID AND pd.SVCDATE = o.SVCDATE
-        LEFT JOIN drug_exp d ON pd.ENROLID = d.ENROLID AND pd.SVCDATE = d.SVCDATE
+        FROM target_patients tp
+        LEFT JOIN inpatient_exp i ON tp.ENROLID = i.ENROLID
+        LEFT JOIN outpatient_exp o ON tp.ENROLID = o.ENROLID
+        LEFT JOIN drug_exp d ON tp.ENROLID = d.ENROLID
         """
         
         result_df = conn.execute(merge_query).fetchdf()
         conn.close()
         
+        # Summary
+        patients_with_spend = (result_df['total_pay'] > 0).sum()
+        print(f"      Summary: {patients_with_spend:,} patients with expenditures ({patients_with_spend/len(result_df)*100:.1f}%)")
+        print(f"      Total expenditure: ${result_df['total_pay'].sum():,.2f}")
+        
         return result_df
         
     except Exception as e:
-        print(f"        Error extracting expenditures: {e}")
+        print(f"      Error extracting expenditures: {e}")
         import traceback
         traceback.print_exc()
         if conn:
             conn.close()
-        result_df = patient_dates.copy()
+        result_df = patients_df.copy()
         result_df['inpatient_pay'] = 0.0
         result_df['outpatient_pay'] = 0.0
         result_df['drug_pay'] = 0.0
@@ -205,9 +182,10 @@ def _extract_expenditures_chunk(patient_dates):
 def process_file(input_file, year):
     """
     Process a single aggregated diagnosis file:
-    1. Filter to study period (June 2021 - June 2023)
-    2. Add expenditure information
-    3. Save with new filename
+    1. Load the file
+    2. Get unique patients
+    3. Extract expenditures for two periods per patient
+    4. Merge and save
     """
     print(f"\n{'='*70}")
     print(f"PROCESSING: {input_file}")
@@ -216,60 +194,53 @@ def process_file(input_file, year):
     # Load file
     print(f"  Step 1: Loading file...")
     df = pd.read_parquet(input_file)
+    print(f"    Total events: {len(df):,}")
     
-    # Detect date column
-    date_col = None
-    for col in ['SVCDATE', 'svcdate', 'date', 'DATE', 'service_date', 'SVCDT']:
-        if col in df.columns:
-            date_col = col
-            break
+    # Get unique patients
+    unique_patients = set(df['ENROLID'].unique())
+    print(f"    Unique patients: {len(unique_patients):,}")
     
-    if not date_col:
-        print(f"  ERROR: No date column found!")
-        print(f"  Available columns: {list(df.columns)}")
-        return None
+    # Extract expenditures for Period 1 (June 2021 - May 2022)
+    print(f"\n  Step 2: Extracting Period 1 expenditures (June 2021 - May 2022)...")
+    period1_exp = extract_patient_expenditures(unique_patients, PERIOD1_START, PERIOD1_END, "Period 1")
+    period1_exp = period1_exp.rename(columns={
+        'inpatient_pay': 'inpatient_pay_period1',
+        'outpatient_pay': 'outpatient_pay_period1',
+        'drug_pay': 'drug_pay_period1',
+        'total_pay': 'total_pay_period1'
+    })
     
-    print(f"  Date column: {date_col}")
-    print(f"  Original events: {len(df):,}")
+    # Extract expenditures for Period 2 (June 2022 - May 2023)
+    print(f"\n  Step 3: Extracting Period 2 expenditures (June 2022 - May 2023)...")
+    period2_exp = extract_patient_expenditures(unique_patients, PERIOD2_START, PERIOD2_END, "Period 2")
+    period2_exp = period2_exp.rename(columns={
+        'inpatient_pay': 'inpatient_pay_period2',
+        'outpatient_pay': 'outpatient_pay_period2',
+        'drug_pay': 'drug_pay_period2',
+        'total_pay': 'total_pay_period2'
+    })
     
-    # Filter to study period
-    print(f"  Step 2: Filtering to study period ({STUDY_START_DATE} to {STUDY_END_DATE})...")
-    original_count = len(df)
-    df_filtered = df[
-        (df[date_col] >= pd.to_datetime(STUDY_START_DATE)) &
-        (df[date_col] <= pd.to_datetime(STUDY_END_DATE))
-    ].copy()
-    filtered_count = len(df_filtered)
-    
-    print(f"  Events after filter: {filtered_count:,} ({filtered_count/original_count*100:.1f}% of original)")
-    
-    if filtered_count == 0:
-        print(f"  No events in study period!")
-        return None
-    
-    # Get unique patient-dates
-    print(f"  Step 3: Extracting expenditures...")
-    patient_dates = df_filtered[['ENROLID', date_col]].drop_duplicates()
-    patient_dates = patient_dates.rename(columns={date_col: 'SVCDATE'})
-    print(f"    Unique patient-dates: {len(patient_dates):,}")
-    
-    expenditures_df = extract_expenditures_for_patient_dates(patient_dates)
-    
-    # Merge
-    print(f"  Step 4: Merging expenditures with prescription data...")
+    # Merge with original data
+    print(f"\n  Step 4: Merging expenditures with prescription data...")
     conn = setup_duckdb_connection()
-    conn.register('events_df', df_filtered)
-    conn.register('expenditures', expenditures_df)
+    conn.register('events_df', df)
+    conn.register('period1_exp', period1_exp)
+    conn.register('period2_exp', period2_exp)
     
-    merge_query = f"""
+    merge_query = """
     SELECT 
         e.*,
-        COALESCE(x.inpatient_pay, 0) as inpatient_pay,
-        COALESCE(x.outpatient_pay, 0) as outpatient_pay,
-        COALESCE(x.drug_pay, 0) as drug_pay,
-        COALESCE(x.total_pay, 0) as total_pay
+        COALESCE(p1.inpatient_pay_period1, 0) as inpatient_pay_period1,
+        COALESCE(p1.outpatient_pay_period1, 0) as outpatient_pay_period1,
+        COALESCE(p1.drug_pay_period1, 0) as drug_pay_period1,
+        COALESCE(p1.total_pay_period1, 0) as total_pay_period1,
+        COALESCE(p2.inpatient_pay_period2, 0) as inpatient_pay_period2,
+        COALESCE(p2.outpatient_pay_period2, 0) as outpatient_pay_period2,
+        COALESCE(p2.drug_pay_period2, 0) as drug_pay_period2,
+        COALESCE(p2.total_pay_period2, 0) as total_pay_period2
     FROM events_df e
-    LEFT JOIN expenditures x ON e.ENROLID = x.ENROLID AND e.{date_col} = x.SVCDATE
+    LEFT JOIN period1_exp p1 ON e.ENROLID = p1.ENROLID
+    LEFT JOIN period2_exp p2 ON e.ENROLID = p2.ENROLID
     """
     
     merged_df = conn.execute(merge_query).fetchdf()
@@ -278,22 +249,20 @@ def process_file(input_file, year):
     # Statistics
     print(f"\n  Results:")
     print(f"    Total events: {len(merged_df):,}")
-    print(f"    Total expenditure: ${merged_df['total_pay'].sum():,.2f}")
-    print(f"    Average expenditure per event: ${merged_df['total_pay'].mean():,.2f}")
-    print(f"    Events with expenditure > $0: {(merged_df['total_pay'] > 0).sum():,} ({(merged_df['total_pay'] > 0).sum()/len(merged_df)*100:.1f}%)")
+    print(f"\n    Period 1 (June 2021 - May 2022):")
+    print(f"      Total expenditure: ${merged_df['total_pay_period1'].sum():,.2f}")
+    print(f"      Inpatient: ${merged_df['inpatient_pay_period1'].sum():,.2f}")
+    print(f"      Outpatient: ${merged_df['outpatient_pay_period1'].sum():,.2f}")
+    print(f"      Drug: ${merged_df['drug_pay_period1'].sum():,.2f}")
     
-    exp_breakdown = {
-        'Inpatient': merged_df['inpatient_pay'].sum(),
-        'Outpatient': merged_df['outpatient_pay'].sum(),
-        'Drug': merged_df['drug_pay'].sum()
-    }
-    print(f"\n  Expenditure breakdown:")
-    for source, amount in exp_breakdown.items():
-        pct = (amount / merged_df['total_pay'].sum() * 100) if merged_df['total_pay'].sum() > 0 else 0
-        print(f"    {source}: ${amount:,.2f} ({pct:.1f}%)")
+    print(f"\n    Period 2 (June 2022 - May 2023):")
+    print(f"      Total expenditure: ${merged_df['total_pay_period2'].sum():,.2f}")
+    print(f"      Inpatient: ${merged_df['inpatient_pay_period2'].sum():,.2f}")
+    print(f"      Outpatient: ${merged_df['outpatient_pay_period2'].sum():,.2f}")
+    print(f"      Drug: ${merged_df['drug_pay_period2'].sum():,.2f}")
     
     # Save
-    output_file = f"prescription_events_{year}_study_period_with_expenditure.parquet"
+    output_file = f"prescription_events_{year}_with_expenditure_by_period.parquet"
     print(f"\n  Step 5: Saving to {output_file}...")
     merged_df.to_parquet(output_file, compression='snappy')
     
@@ -301,7 +270,7 @@ def process_file(input_file, year):
     print(f"  Saved: {output_size_mb:.1f} MB")
     
     # Cleanup
-    del df, df_filtered, patient_dates, expenditures_df, merged_df
+    del df, period1_exp, period2_exp, merged_df
     import gc
     gc.collect()
     
@@ -309,19 +278,20 @@ def process_file(input_file, year):
 
 def main():
     """
-    Main function: Add expenditures to aggregated diagnosis files for 2021-2023
+    Main function: Add expenditures by period to aggregated diagnosis files
     """
     print("=" * 70)
-    print("ADD EXPENDITURES TO AGGREGATED DIAGNOSIS FILES")
-    print("STUDY PERIOD: JUNE 2021 - JUNE 2023")
+    print("ADD EXPENDITURES BY PERIOD TO DIAGNOSIS FILES")
     print("=" * 70)
+    print(f"\nPeriod 1: {PERIOD1_START} to {PERIOD1_END}")
+    print(f"Period 2: {PERIOD2_START} to {PERIOD2_END}")
+    print("\nExpenditures aggregated per patient (not per date)")
     
     # Find the 3 aggregated files
     years = [2021, 2022, 2023]
     input_files = {}
     
     for year in years:
-        # Look for the actual file pattern
         pattern = f"prescription_events_{year}_with_ndcnum_with_diagnosis.parquet"
         
         if Path(pattern).exists():
@@ -332,7 +302,6 @@ def main():
     
     if not input_files:
         print(f"\nERROR: No aggregated diagnosis files found!")
-        print(f"Looking for files like: prescription_events_YYYY_with_diagnosis.parquet")
         return
     
     print(f"\nFound {len(input_files)} aggregated files:")
@@ -340,11 +309,6 @@ def main():
         file_size = Path(filepath).stat().st_size / (1024*1024)
         print(f"  {year}: {filepath} ({file_size:.1f} MB)")
     
-    print(f"\nStudy period: {STUDY_START_DATE} to {STUDY_END_DATE}")
-    print("\nExpenditures will be added from:")
-    print(f"  - Inpatient: TOTNET from CCAE_I.parquet")
-    print(f"  - Outpatient: NETPAY from CCAE_O.parquet")
-    print(f"  - Drug: NETPAY from CCAE_D.parquet")
     print("=" * 70)
     
     # Process each file
@@ -370,23 +334,21 @@ def main():
     
     if processed_files:
         print(f"\nOutput files created:")
-        total_events = 0
-        total_expenditure = 0.0
-        
         for file in processed_files:
             file_size = Path(file).stat().st_size / (1024*1024)
-            df = pd.read_parquet(file, columns=['total_pay'])
-            total_events += len(df)
-            total_expenditure += df['total_pay'].sum()
-            print(f"  {file}")
-            print(f"    Size: {file_size:.1f} MB")
-            print(f"    Events: {len(df):,}")
-            print(f"    Total expenditure: ${df['total_pay'].sum():,.2f}")
+            print(f"  {file} ({file_size:.1f} MB)")
         
-        print(f"\nOverall totals across all files:")
-        print(f"  Total events: {total_events:,}")
-        print(f"  Total expenditure: ${total_expenditure:,.2f}")
-        print(f"  Average per event: ${total_expenditure/total_events:,.2f}")
+        print(f"\nEach file contains 8 new expenditure columns:")
+        print(f"  Period 1 (June 2021 - May 2022):")
+        print(f"    - inpatient_pay_period1")
+        print(f"    - outpatient_pay_period1")
+        print(f"    - drug_pay_period1")
+        print(f"    - total_pay_period1")
+        print(f"  Period 2 (June 2022 - May 2023):")
+        print(f"    - inpatient_pay_period2")
+        print(f"    - outpatient_pay_period2")
+        print(f"    - drug_pay_period2")
+        print(f"    - total_pay_period2")
 
 if __name__ == "__main__":
     main()
