@@ -1,4 +1,3 @@
-
 import pandas as pd
 import duckdb
 import os
@@ -322,23 +321,14 @@ def main():
     input_files = {}
     
     for year in years:
-        # Try different possible naming patterns
-        patterns = [
-            f"prescription_events_{year}_with_diagnosis.parquet",
-            f"prescription_events_{year}_aggregated_with_diagnosis.parquet",
-            f"prescription_events_{year}_all_with_diagnosis.parquet"
-        ]
+        # Look for the actual file pattern
+        pattern = f"prescription_events_{year}_with_ndcnum_with_diagnosis.parquet"
         
-        found = False
-        for pattern in patterns:
-            if Path(pattern).exists():
-                input_files[year] = pattern
-                found = True
-                break
-        
-        if not found:
+        if Path(pattern).exists():
+            input_files[year] = pattern
+        else:
             print(f"\nWARNING: Could not find aggregated file for {year}")
-            print(f"  Tried patterns: {patterns}")
+            print(f"  Looking for: {pattern}")
     
     if not input_files:
         print(f"\nERROR: No aggregated diagnosis files found!")
