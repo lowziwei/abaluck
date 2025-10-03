@@ -135,7 +135,7 @@ for year_idx, year in enumerate(YEARS):
         # Load data for this chunk from current year
         try:
             query = f"""
-            SELECT ENROLID, SVCDATE, DX1, DX2, DX3, DX4, TOTNET
+            SELECT ENROLID, SVCDATE, DX1, DX2, DX3, DX4, NETPAY
             FROM '{file_path}'
             WHERE ENROLID IN ({patient_list})
             AND SVCDATE IS NOT NULL
@@ -151,7 +151,7 @@ for year_idx, year in enumerate(YEARS):
             continue
         
         chunk_df['SVCDATE'] = pd.to_datetime(chunk_df['SVCDATE'])
-        chunk_df['TOTNET'] = pd.to_numeric(chunk_df['TOTNET'], errors='coerce').fillna(0)
+        chunk_df['NETPAY'] = pd.to_numeric(chunk_df['NETPAY'], errors='coerce').fillna(0)
         
         print(f"{len(chunk_df):,} visits", end=" ")
         
@@ -230,7 +230,7 @@ for year_idx, year in enumerate(YEARS):
         # Aggregate to episode level
         episode_summary = chunk_with_episodes.groupby(['ENROLID', 'EPISODEID']).agg({
             'SVCDATE': ['nunique', 'min', 'max'],
-            'TOTNET': 'sum',
+            'NETPAY': 'sum',
             'dx_codes': lambda x: sorted(list(set([code for sublist in x for code in sublist])))
         }).reset_index()
         
