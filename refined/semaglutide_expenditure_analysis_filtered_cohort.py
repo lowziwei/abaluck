@@ -54,7 +54,6 @@ def get_patient_demographics():
         enroll_file = f"{data_path}/{DATABASE}_T_{year}.parquet"
         if Path(enroll_file).exists():
             print(f"    Reading {DATABASE}_T_{year}.parquet...")
-            # Calculate AGE from DOBYR (date of birth year)
             query = f"""
             SELECT DISTINCT
                 ENROLID,
@@ -68,7 +67,6 @@ def get_patient_demographics():
         print("    WARNING: No enrollment files found!")
         return pd.DataFrame(columns=['ENROLID', 'AGE', 'SEX'])
     demographics = pd.concat(enroll_dfs, ignore_index=True)
-    # Take most recent age for each patient
     demographics = demographics.sort_values('AGE', ascending=False).drop_duplicates('ENROLID', keep='first')
     print(f"    Loaded demographics for {len(demographics):,} patients")
     conn.close()
@@ -76,30 +74,43 @@ def get_patient_demographics():
 
 def identify_first_semaglutide_prescription():
     print("  Identifying first semaglutide prescriptions...")
-    data_path = f"/data/MarketScan_data/{DATASET_TYPE}"
-    conn = setup_duckdb_connection()
-    sema_df = pd.DataFrame({'NDCNUM': list(SEMAGLUTIDE_NDCS)})
-    conn.register('semaglutide_ndcs', sema_df)
+    
+    # Use the already-processed prescription event files which have phys_ids
     sema_prescriptions = []
     for year in range(2019, 2024):
-        drug_file = f"{data_path}/{DATABASE}_D_{year}.parquet"
-        if Path(drug_file).exists():
-            print(f"    Reading {DATABASE}_D_{year}.parquet...")
-            query = f"""
-            SELECT ENROLID, SVCDATE, PROVID as phys_ids
-            FROM '{drug_file}'
-            WHERE NDCNUM IN (SELECT NDCNUM FROM semaglutide_ndcs)
-            AND SVCDATE >= DATE '{PERIOD_M1_START}' AND SVCDATE <= DATE '{PERIOD_2_END}'
-            """
-            sema_prescriptions.append(conn.execute(query).fetchdf())
+        event_file = f"prescription_events_{year}_with_ndcnum_with_diagnosis.parquet"
+        if Path(event_file).exists():
+            print(f"    Reading {event_file}...")
+            df = pd.read_parquet(event_file)
+            
+            # Filter to semaglutide prescriptions
+            sema_df = df[df['NDCNUM'].isin(SEMAGLUTIDE_NDCS)].copy()
+            
+            if len(sema_df) > 0:
+                sema_df = sema_df[['ENROLID', 'SVCDATE', 'phys_ids']].copy()
+                sema_prescriptions.append(sema_df)
+                print(f"      Found {len(sema_df):,} semaglutide prescriptions")
+    
     if not sema_prescriptions:
         print("    WARNING: No semaglutide prescriptions found!")
         return pd.DataFrame(columns=['ENROLID', 'first_sema_date', 'first_sema_physician', 'first_sema_period'])
+    
     all_sema = pd.concat(sema_prescriptions, ignore_index=True)
     print(f"    Total semaglutide prescriptions: {len(all_sema):,}")
+    
     all_sema['SVCDATE'] = pd.to_datetime(all_sema['SVCDATE'])
+    
+    # Filter to our study period
+    all_sema = all_sema[
+        (all_sema['SVCDATE'] >= PERIOD_M1_START) & 
+        (all_sema['SVCDATE'] <= PERIOD_2_END)
+    ]
+    print(f"    Prescriptions in study period: {len(all_sema):,}")
+    
+    # Find first prescription per patient
     first_sema = all_sema.sort_values('SVCDATE').groupby('ENROLID').first().reset_index()
     first_sema = first_sema.rename(columns={'SVCDATE': 'first_sema_date', 'phys_ids': 'first_sema_physician'})
+    
     def assign_period(date):
         if pd.isna(date):
             return None
@@ -114,117 +125,180 @@ def identify_first_semaglutide_prescription():
             return 'Period 2'
         else:
             return 'Outside periods'
+    
     first_sema['first_sema_period'] = first_sema['first_sema_date'].apply(assign_period)
     print(f"    Patients with first semaglutide prescription: {len(first_sema):,}")
     print("\n    First prescriptions by period:")
     print(first_sema['first_sema_period'].value_counts().sort_index())
-    conn.close()
+    
     return first_sema
 
-def extract_patient_expenditures(patient_ids, period_start, period_end, period_name):
+def extract_patient_expenditures_batch(patient_ids, period_start, period_end, period_name, batch_size=5000):
+    """
+    Extract expenditures in batches to limit memory usage
+    """
     print(f"    Extracting expenditures for {len(patient_ids):,} patients")
     print(f"    Period: {period_start} to {period_end}")
-    conn = setup_duckdb_connection()
-    try:
-        patients_df = pd.DataFrame({'ENROLID': list(patient_ids)})
-        conn.register('target_patients', patients_df)
-        sema_df = pd.DataFrame({'NDCNUM': list(SEMAGLUTIDE_NDCS)})
-        conn.register('semaglutide_ndcs', sema_df)
-        data_path = f"/data/MarketScan_data/{DATASET_TYPE}"
-        period_start_dt = pd.to_datetime(period_start)
-        period_end_dt = pd.to_datetime(period_end)
-        years_to_query = list(range(period_start_dt.year, period_end_dt.year + 1))
+    print(f"    Using batch size: {batch_size:,}")
+    
+    patient_list = list(patient_ids)
+    all_results = []
+    
+    num_batches = (len(patient_list) + batch_size - 1) // batch_size
+    
+    for batch_num in range(num_batches):
+        start_idx = batch_num * batch_size
+        end_idx = min((batch_num + 1) * batch_size, len(patient_list))
+        batch_patients = patient_list[start_idx:end_idx]
         
-        inpatient_dfs = []
-        inpatient_file = f"{data_path}/{DATABASE}_I.parquet"
-        if Path(inpatient_file).exists():
-            inpatient_query = f"""
-            SELECT ENROLID, SUM(COALESCE(TOTNET, 0)) as inpatient_pay
-            FROM '{inpatient_file}'
-            WHERE ENROLID IN (SELECT ENROLID FROM target_patients)
-            AND ADMDATE >= DATE '{period_start}' AND ADMDATE <= DATE '{period_end}'
-            GROUP BY ENROLID
-            """
-            inpatient_dfs.append(conn.execute(inpatient_query).fetchdf())
-        inpatient_df = pd.concat(inpatient_dfs, ignore_index=True).groupby('ENROLID', as_index=False)['inpatient_pay'].sum() if inpatient_dfs else pd.DataFrame(columns=['ENROLID', 'inpatient_pay'])
+        print(f"      Batch {batch_num + 1}/{num_batches}: Processing {len(batch_patients):,} patients...")
         
-        outpatient_dfs = []
-        for year in years_to_query:
-            outpatient_file = f"{data_path}/{DATABASE}_O_{year}.parquet"
-            if Path(outpatient_file).exists():
-                outpatient_query = f"""
-                SELECT ENROLID, SUM(COALESCE(NETPAY, 0)) as outpatient_pay
-                FROM '{outpatient_file}'
-                WHERE ENROLID IN (SELECT ENROLID FROM target_patients)
-                AND SVCDATE >= DATE '{period_start}' AND SVCDATE <= DATE '{period_end}'
+        conn = setup_duckdb_connection(memory_limit='4GB')
+        
+        try:
+            # Create patient list string for IN clause
+            patient_str = ','.join(str(p) for p in batch_patients)
+            
+            data_path = f"/data/MarketScan_data/{DATASET_TYPE}"
+            period_start_dt = pd.to_datetime(period_start)
+            period_end_dt = pd.to_datetime(period_end)
+            years_to_query = list(range(period_start_dt.year, period_end_dt.year + 1))
+            
+            # INPATIENT
+            inpatient_file = f"{data_path}/{DATABASE}_I.parquet"
+            if Path(inpatient_file).exists():
+                inpatient_query = f"""
+                SELECT ENROLID, SUM(COALESCE(TOTNET, 0)) as inpatient_pay
+                FROM read_parquet('{inpatient_file}')
+                WHERE ENROLID IN ({patient_str})
+                AND ADMDATE >= '{period_start}' AND ADMDATE <= '{period_end}'
                 GROUP BY ENROLID
                 """
-                outpatient_dfs.append(conn.execute(outpatient_query).fetchdf())
-        outpatient_df = pd.concat(outpatient_dfs, ignore_index=True).groupby('ENROLID', as_index=False)['outpatient_pay'].sum() if outpatient_dfs else pd.DataFrame(columns=['ENROLID', 'outpatient_pay'])
-        
-        drug_dfs = []
-        for year in years_to_query:
-            drug_file = f"{data_path}/{DATABASE}_D_{year}.parquet"
-            if Path(drug_file).exists():
-                drug_query = f"""
-                SELECT ENROLID, SUM(COALESCE(NETPAY, 0)) as drug_pay
-                FROM '{drug_file}'
-                WHERE ENROLID IN (SELECT ENROLID FROM target_patients)
-                AND SVCDATE >= DATE '{period_start}' AND SVCDATE <= DATE '{period_end}'
-                AND NDCNUM NOT IN (SELECT NDCNUM FROM semaglutide_ndcs)
+                inpatient_df = conn.execute(inpatient_query).fetchdf()
+            else:
+                inpatient_df = pd.DataFrame(columns=['ENROLID', 'inpatient_pay'])
+            
+            # OUTPATIENT - UNION ALL approach
+            outpatient_queries = []
+            for year in years_to_query:
+                outpatient_file = f"{data_path}/{DATABASE}_O_{year}.parquet"
+                if Path(outpatient_file).exists():
+                    outpatient_queries.append(f"""
+                    SELECT ENROLID, COALESCE(NETPAY, 0) as outpatient_pay
+                    FROM read_parquet('{outpatient_file}')
+                    WHERE ENROLID IN ({patient_str})
+                    AND SVCDATE >= '{period_start}' AND SVCDATE <= '{period_end}'
+                    """)
+            
+            if outpatient_queries:
+                combined_outpatient = " UNION ALL ".join(outpatient_queries)
+                final_outpatient_query = f"""
+                SELECT ENROLID, SUM(outpatient_pay) as outpatient_pay
+                FROM ({combined_outpatient})
                 GROUP BY ENROLID
                 """
-                drug_dfs.append(conn.execute(drug_query).fetchdf())
-        drug_df = pd.concat(drug_dfs, ignore_index=True).groupby('ENROLID', as_index=False)['drug_pay'].sum() if drug_dfs else pd.DataFrame(columns=['ENROLID', 'drug_pay'])
-        
-        sema_drug_dfs = []
-        for year in years_to_query:
-            drug_file = f"{data_path}/{DATABASE}_D_{year}.parquet"
-            if Path(drug_file).exists():
-                sema_drug_query = f"""
-                SELECT ENROLID, SUM(COALESCE(NETPAY, 0)) as semaglutide_pay
-                FROM '{drug_file}'
-                WHERE ENROLID IN (SELECT ENROLID FROM target_patients)
-                AND SVCDATE >= DATE '{period_start}' AND SVCDATE <= DATE '{period_end}'
-                AND NDCNUM IN (SELECT NDCNUM FROM semaglutide_ndcs)
+                outpatient_df = conn.execute(final_outpatient_query).fetchdf()
+            else:
+                outpatient_df = pd.DataFrame(columns=['ENROLID', 'outpatient_pay'])
+            
+            # DRUGS (non-sema) - UNION ALL approach
+            sema_str = ','.join(f"'{ndc}'" for ndc in SEMAGLUTIDE_NDCS)
+            drug_queries = []
+            for year in years_to_query:
+                drug_file = f"{data_path}/{DATABASE}_D_{year}.parquet"
+                if Path(drug_file).exists():
+                    drug_queries.append(f"""
+                    SELECT ENROLID, COALESCE(NETPAY, 0) as drug_pay
+                    FROM read_parquet('{drug_file}')
+                    WHERE ENROLID IN ({patient_str})
+                    AND SVCDATE >= '{period_start}' AND SVCDATE <= '{period_end}'
+                    AND NDCNUM NOT IN ({sema_str})
+                    """)
+            
+            if drug_queries:
+                combined_drug = " UNION ALL ".join(drug_queries)
+                final_drug_query = f"""
+                SELECT ENROLID, SUM(drug_pay) as drug_pay
+                FROM ({combined_drug})
                 GROUP BY ENROLID
                 """
-                sema_drug_dfs.append(conn.execute(sema_drug_query).fetchdf())
-        sema_drug_df = pd.concat(sema_drug_dfs, ignore_index=True).groupby('ENROLID', as_index=False)['semaglutide_pay'].sum() if sema_drug_dfs else pd.DataFrame(columns=['ENROLID', 'semaglutide_pay'])
-        
-        conn.register('inpatient_exp', inpatient_df)
-        conn.register('outpatient_exp', outpatient_df)
-        conn.register('drug_exp', drug_df)
-        conn.register('sema_drug_exp', sema_drug_df)
-        
-        merge_query = """
-        SELECT tp.ENROLID,
-            COALESCE(i.inpatient_pay, 0) as inpatient_pay,
-            COALESCE(o.outpatient_pay, 0) as outpatient_pay,
-            COALESCE(d.drug_pay, 0) as drug_pay,
-            COALESCE(s.semaglutide_pay, 0) as semaglutide_pay,
-            COALESCE(i.inpatient_pay, 0) + COALESCE(o.outpatient_pay, 0) + COALESCE(d.drug_pay, 0) as total_pay_no_sema,
-            COALESCE(i.inpatient_pay, 0) + COALESCE(o.outpatient_pay, 0) + COALESCE(d.drug_pay, 0) + COALESCE(s.semaglutide_pay, 0) as total_pay_with_sema
-        FROM target_patients tp
-        LEFT JOIN inpatient_exp i ON tp.ENROLID = i.ENROLID
-        LEFT JOIN outpatient_exp o ON tp.ENROLID = o.ENROLID
-        LEFT JOIN drug_exp d ON tp.ENROLID = d.ENROLID
-        LEFT JOIN sema_drug_exp s ON tp.ENROLID = s.ENROLID
-        """
-        result_df = conn.execute(merge_query).fetchdf()
-        conn.close()
-        print(f"      Total expenditure (no sema): ${result_df['total_pay_no_sema'].sum():,.2f}")
-        print(f"      Semaglutide expenditure: ${result_df['semaglutide_pay'].sum():,.2f}")
-        print(f"      Total expenditure (with sema): ${result_df['total_pay_with_sema'].sum():,.2f}")
-        return result_df
-    except Exception as e:
-        print(f"      Error: {e}")
-        if conn:
+                drug_df = conn.execute(final_drug_query).fetchdf()
+            else:
+                drug_df = pd.DataFrame(columns=['ENROLID', 'drug_pay'])
+            
+            # SEMAGLUTIDE DRUGS - UNION ALL approach
+            sema_drug_queries = []
+            for year in years_to_query:
+                drug_file = f"{data_path}/{DATABASE}_D_{year}.parquet"
+                if Path(drug_file).exists():
+                    sema_drug_queries.append(f"""
+                    SELECT ENROLID, COALESCE(NETPAY, 0) as semaglutide_pay
+                    FROM read_parquet('{drug_file}')
+                    WHERE ENROLID IN ({patient_str})
+                    AND SVCDATE >= '{period_start}' AND SVCDATE <= '{period_end}'
+                    AND NDCNUM IN ({sema_str})
+                    """)
+            
+            if sema_drug_queries:
+                combined_sema = " UNION ALL ".join(sema_drug_queries)
+                final_sema_query = f"""
+                SELECT ENROLID, SUM(semaglutide_pay) as semaglutide_pay
+                FROM ({combined_sema})
+                GROUP BY ENROLID
+                """
+                sema_drug_df = conn.execute(final_sema_query).fetchdf()
+            else:
+                sema_drug_df = pd.DataFrame(columns=['ENROLID', 'semaglutide_pay'])
+            
+            # MERGE for this batch
+            batch_df = pd.DataFrame({'ENROLID': batch_patients})
+            batch_df = batch_df.merge(inpatient_df, on='ENROLID', how='left')
+            batch_df = batch_df.merge(outpatient_df, on='ENROLID', how='left')
+            batch_df = batch_df.merge(drug_df, on='ENROLID', how='left')
+            batch_df = batch_df.merge(sema_drug_df, on='ENROLID', how='left')
+            batch_df = batch_df.fillna(0)
+            
+            batch_df['total_pay_no_sema'] = (
+                batch_df['inpatient_pay'] + 
+                batch_df['outpatient_pay'] + 
+                batch_df['drug_pay']
+            )
+            batch_df['total_pay_with_sema'] = (
+                batch_df['total_pay_no_sema'] + 
+                batch_df['semaglutide_pay']
+            )
+            
+            all_results.append(batch_df)
             conn.close()
-        result_df = patients_df.copy()
-        for col in ['inpatient_pay', 'outpatient_pay', 'drug_pay', 'semaglutide_pay', 'total_pay_no_sema', 'total_pay_with_sema']:
-            result_df[col] = 0.0
-        return result_df
+            
+            # Clean up
+            del inpatient_df, outpatient_df, drug_df, sema_drug_df, batch_df
+            import gc
+            gc.collect()
+            
+        except Exception as e:
+            print(f"      Error in batch {batch_num + 1}: {e}")
+            if conn:
+                conn.close()
+            # Return zeros for this batch
+            batch_df = pd.DataFrame({'ENROLID': batch_patients})
+            for col in ['inpatient_pay', 'outpatient_pay', 'drug_pay', 'semaglutide_pay', 'total_pay_no_sema', 'total_pay_with_sema']:
+                batch_df[col] = 0.0
+            all_results.append(batch_df)
+    
+    # Combine all batches
+    print(f"      Combining {len(all_results)} batches...")
+    result_df = pd.concat(all_results, ignore_index=True)
+    
+    print(f"      Total expenditure (no sema): ${result_df['total_pay_no_sema'].sum():,.2f}")
+    print(f"      Semaglutide expenditure: ${result_df['semaglutide_pay'].sum():,.2f}")
+    print(f"      Total expenditure (with sema): ${result_df['total_pay_with_sema'].sum():,.2f}")
+    
+    return result_df
+
+def extract_patient_expenditures(patient_ids, period_start, period_end, period_name):
+    """Wrapper to call batched version"""
+    return extract_patient_expenditures_batch(patient_ids, period_start, period_end, period_name, batch_size=5000)
 
 def main():
     print("=" * 70)
@@ -420,10 +494,6 @@ def main():
         ],
         'value': [
             final_df['ENROLID'].nunique(), final_df['phys_ids'].nunique(), len(physicians_10plus),
-            (first_sema_filtered['first_sema_period'] == 'Period -1').sum(),
-            (first_sema_filtered['first_sema_period'] == 'Period 0').sum(),
-            (first_sema_filtered['first_sema_period'] == 'Period 1').sum(),
-            (first_sema_filtered['first_sema_period'] == 'Period 2').sum(),
             final_df['total_pay_no_sema_period_m1'].sum(), final_df['total_pay_no_sema_period_0'].sum(),
             final_df['total_pay_no_sema_period_1'].sum(), final_df['total_pay_no_sema_period_2'].sum(),
             final_df['semaglutide_pay_period_m1'].sum(), final_df['semaglutide_pay_period_0'].sum(),
