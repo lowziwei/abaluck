@@ -2,285 +2,307 @@ import duckdb
 import pandas as pd
 from datetime import timedelta
 import numpy as np
-from pathlib import Path
-import pickle
+import os
+import time
+import psutil
+import gc
 
 # Settings
-DATASET_TYPE = "COMMERCIAL_SET_A"  
-DATABASE = "CCAE"                  
-TABLE_CODE = "O"                   
-YEARS = ["2014", "2015", "2016", "2017", "2018", "2019", "2020", "2021", "2022", "2023", "2024"]
+DATASET_TYPE = "MEDICARE_SET_A"
+DATABASE = "MDCR"
+TABLE_CODE = "O"
+YEARS = [str(year) for year in range(2014, 2014)]  # 2014-2024
 
 # Episode definition parameters
-DX_DIGITS = 3  
-TIME_WINDOW_DAYS = 100  
-PATIENT_CHUNK_SIZE = 100  
+DX_DIGITS = 3
+TIME_WINDOW_DAYS = 100
+PATIENT_CHUNK_SIZE = 2000
 
-# Connect to DuckDB
-conn = duckdb.connect()
+# SAMPLING PARAMETER
+SAMPLE_SIZE = 15000
+
+# Directories
+home_dir = os.path.expanduser('~')
+output_dir = os.path.join(home_dir, 'episode_outputs')
+temp_dir = os.path.join(home_dir, 'duckdb_temp')
+
+os.makedirs(output_dir, exist_ok=True)
+os.makedirs(temp_dir, exist_ok=True)
+
+np.random.seed(42)
 
 print("="*100)
-print("EFFICIENT YEAR-BY-YEAR EPISODE PROCESSING")
+print("HIGHLY OPTIMIZED EPISODE PROCESSING")
 print("="*100)
+print(f"Years: {YEARS[0]}-{YEARS[-1]} | Sample: {SAMPLE_SIZE:,} patients | Chunk: {PATIENT_CHUNK_SIZE:,}")
+print("Optimizations: Vectorized ops + Minimal copying + Efficient aggregation")
 
-def define_episodes(patient_df, dx_digits=3, time_window_days=100, starting_episode_num=1):
+def define_episodes_optimized(df, dx_digits=3, time_window_days=100):
     """
-    Define episodes for a patient based on matching diagnosis codes within time window.
-    Returns the dataframe with episode_id added, starting from starting_episode_num.
+    OPTIMIZED: Episode assignment with rolling window diagnosis check.
+    Uses efficient vectorized operations where possible, with targeted iteration for complex logic.
     """
-    if len(patient_df) == 0:
-        return patient_df, starting_episode_num
-    
-    patient_df = patient_df.sort_values('SVCDATE').reset_index(drop=True)
-    
-    def get_dx_set(row, digits):
-        dx_codes = []
-        for dx_col in ['DX1', 'DX2', 'DX3', 'DX4']:
-            val = row[dx_col]
-            if pd.notna(val) and val != '' and val != ' ':
-                truncated = str(val)[:digits]
-                dx_codes.append(truncated)
-        return set(dx_codes)
-    
-    patient_df['all_dx'] = patient_df.apply(lambda row: get_dx_set(row, dx_digits), axis=1)
-    patient_df['has_dx'] = patient_df['all_dx'].apply(lambda x: len(x) > 0)
-    
-    episodes = []
-    episode_counter = starting_episode_num
-    
-    for idx, row in patient_df.iterrows():
-        current_date = row['SVCDATE']
-        current_dx = row['all_dx']
-        has_dx = row['has_dx']
-        
-        if idx == 0:
-            episodes.append(episode_counter)
+    if len(df) == 0:
+        return df
+
+    # Sort once (required for logic)
+    df.sort_values(['ENROLID', 'SVCDATE'], inplace=True)
+    df.reset_index(drop=True, inplace=True)
+
+    # Vectorized: Clean and truncate diagnosis codes in-place
+    # IMPORTANT: Replace None/nan BEFORE truncating to avoid "Non" appearing in data
+    for col in ['DX1', 'DX2', 'DX3', 'DX4']:
+        df[col] = df[col].astype(str)
+        df[col].replace(['', 'nan', 'None', 'Non', ' ', 'nat'], np.nan, inplace=True)
+        df[col] = df[col].str[:dx_digits]
+        # Clean again after truncation in case truncation created invalid values
+        df[col].replace(['', 'nan', 'Non', ' '], np.nan, inplace=True)
+
+    # Initialize episode tracking
+    df['episode_id'] = 0
+    current_episode = 0
+
+    # Process each patient separately
+    for patient_id in df['ENROLID'].unique():
+        patient_mask = df['ENROLID'] == patient_id
+        patient_indices = df[patient_mask].index.tolist()
+
+        if len(patient_indices) == 0:
             continue
-        
-        lookback_date = current_date - timedelta(days=time_window_days)
-        matched_episode = None
-        
-        if has_dx:
-            for prev_idx in range(idx):
-                prev_date = patient_df.iloc[prev_idx]['SVCDATE']
-                prev_dx = patient_df.iloc[prev_idx]['all_dx']
-                
-                if prev_date >= lookback_date:
-                    if len(current_dx & prev_dx) > 0:
-                        matched_episode = episodes[prev_idx]
+
+        # Start first episode for this patient
+        current_episode += 1
+        df.loc[patient_indices[0], 'episode_id'] = current_episode
+
+        # Track active episodes: {episode_id: {'date': last_date, 'dx_codes': set of codes}}
+        active_episodes = {
+            current_episode: {
+                'date': df.loc[patient_indices[0], 'SVCDATE'],
+                'dx_codes': set(df.loc[patient_indices[0], ['DX1', 'DX2', 'DX3', 'DX4']].dropna().values)
+            }
+        }
+
+        # Process remaining visits for this patient
+        for idx in patient_indices[1:]:
+            visit_date = df.loc[idx, 'SVCDATE']
+            visit_dx = set(df.loc[idx, ['DX1', 'DX2', 'DX3', 'DX4']].dropna().values)
+
+            # Remove expired episodes (outside time window)
+            episodes_to_remove = []
+            for ep_id, ep_data in active_episodes.items():
+                days_diff = (visit_date - ep_data['date']).days
+                if days_diff > time_window_days:
+                    episodes_to_remove.append(ep_id)
+
+            for ep_id in episodes_to_remove:
+                del active_episodes[ep_id]
+
+            # Check if this visit matches any active episode
+            matched_episode = None
+            if len(visit_dx) > 0:  # Only check if visit has diagnosis codes
+                for ep_id, ep_data in active_episodes.items():
+                    # Check for diagnosis overlap
+                    if len(visit_dx & ep_data['dx_codes']) > 0:
+                        matched_episode = ep_id
                         break
-        else:
-            for prev_idx in range(idx - 1, -1, -1):
-                prev_date = patient_df.iloc[prev_idx]['SVCDATE']
-                
-                if prev_date >= lookback_date:
-                    matched_episode = episodes[prev_idx]
-                    break
-        
-        if matched_episode is not None:
-            episodes.append(matched_episode)
-        else:
-            episode_counter += 1
-            episodes.append(episode_counter)
-    
-    patient_df['episode_id'] = episodes
-    patient_df = patient_df.drop(['all_dx', 'has_dx'], axis=1)
-    
-    return patient_df, episode_counter
 
-output_file = f'episode_summary_{DX_DIGITS}digit_{TIME_WINDOW_DAYS}days.csv'
-first_write = True
-
-# Global episode counter across all patients and years
-global_episode_id = 1
-
-# Track cross-year state for each patient
-# patient_state[enrolid] = {'carryover_data': df, 'next_episode_num': int}
-patient_state = {}
-
-# Process year by year
-for year_idx, year in enumerate(YEARS):
-    print(f"\n{'='*100}")
-    print(f"PROCESSING YEAR {year} ({year_idx + 1}/{len(YEARS)})")
-    print(f"{'='*100}")
-    
-    file_path = f"/data/MarketScan_data/{DATASET_TYPE}/{DATABASE}_{TABLE_CODE}_{year}.parquet"
-    
-    # Step 1: Get unique patients for this year
-    try:
-        query = f"""
-        SELECT DISTINCT ENROLID 
-        FROM '{file_path}'
-        WHERE ENROLID IS NOT NULL
-        """
-        year_patients = conn.execute(query).df()['ENROLID'].values
-        print(f"\nUnique patients in {year}: {len(year_patients):,}")
-    except Exception as e:
-        print(f"Error accessing {year}: {e}")
-        continue
-    
-    # Step 2: Process in chunks
-    patient_chunks = [year_patients[i:i + PATIENT_CHUNK_SIZE] 
-                     for i in range(0, len(year_patients), PATIENT_CHUNK_SIZE)]
-    print(f"Processing in {len(patient_chunks)} chunks of up to {PATIENT_CHUNK_SIZE} patients")
-    
-    # Track state for next year
-    new_patient_state = {}
-    
-    for chunk_idx, patient_chunk in enumerate(patient_chunks, 1):
-        print(f"\n  Chunk {chunk_idx}/{len(patient_chunks)} ({len(patient_chunk)} patients)...", end=" ")
-        
-        patient_list = ', '.join([str(int(p)) for p in patient_chunk])
-        
-        # Load data for this chunk from current year
-        try:
-            query = f"""
-            SELECT ENROLID, SVCDATE, DX1, DX2, DX3, DX4, NETPAY
-            FROM '{file_path}'
-            WHERE ENROLID IN ({patient_list})
-            AND SVCDATE IS NOT NULL
-            """
-            chunk_df = conn.execute(query).df()
-            
-        except Exception as e:
-            print(f"Error: {e}")
-            continue
-        
-        if len(chunk_df) == 0:
-            print("No data")
-            continue
-        
-        chunk_df['SVCDATE'] = pd.to_datetime(chunk_df['SVCDATE'])
-        chunk_df['NETPAY'] = pd.to_numeric(chunk_df['NETPAY'], errors='coerce').fillna(0)
-        
-        print(f"{len(chunk_df):,} visits", end=" ")
-        
-        # Process each patient
-        chunk_episodes = []
-        
-        for patient_id in patient_chunk:
-            patient_data = chunk_df[chunk_df['ENROLID'] == patient_id].copy()
-            
-            if len(patient_data) == 0:
-                continue
-            
-            # Check if this patient has carryover data from previous year
-            starting_episode_num = 1
-            if patient_id in patient_state:
-                carryover = patient_state[patient_id]['carryover_data']
-                starting_episode_num = patient_state[patient_id]['next_episode_num']
-                
-                # Combine carryover with current year data
-                patient_data = pd.concat([carryover, patient_data], ignore_index=True)
-                patient_data = patient_data.sort_values('SVCDATE').reset_index(drop=True)
-            
-            # Define episodes
-            patient_with_episodes, max_episode_num = define_episodes(
-                patient_data, 
-                dx_digits=DX_DIGITS, 
-                time_window_days=TIME_WINDOW_DAYS,
-                starting_episode_num=starting_episode_num
-            )
-            
-            # Create unique global episode IDs
-            unique_episode_ids = patient_with_episodes['episode_id'].unique()
-            episode_id_mapping = {old_id: global_episode_id + i 
-                                 for i, old_id in enumerate(sorted(unique_episode_ids))}
-            
-            patient_with_episodes['EPISODEID'] = patient_with_episodes['episode_id'].map(episode_id_mapping)
-            
-            # Update global counter
-            global_episode_id += len(unique_episode_ids)
-            
-            chunk_episodes.append(patient_with_episodes)
-            
-            # Store carryover data for next year (last TIME_WINDOW_DAYS of visits)
-            year_end = pd.Timestamp(f'{year}-12-31')
-            lookback_date = year_end - timedelta(days=TIME_WINDOW_DAYS)
-            
-            carryover_data = patient_with_episodes[
-                patient_with_episodes['SVCDATE'] >= lookback_date
-            ].copy()
-            
-            if len(carryover_data) > 0:
-                new_patient_state[patient_id] = {
-                    'carryover_data': carryover_data,
-                    'next_episode_num': max_episode_num + 1
+            # Assign episode
+            if matched_episode is not None:
+                # Continue existing episode
+                df.loc[idx, 'episode_id'] = matched_episode
+                # Update episode data
+                active_episodes[matched_episode]['date'] = visit_date
+                active_episodes[matched_episode]['dx_codes'].update(visit_dx)
+            else:
+                # Start new episode
+                current_episode += 1
+                df.loc[idx, 'episode_id'] = current_episode
+                active_episodes[current_episode] = {
+                    'date': visit_date,
+                    'dx_codes': visit_dx
                 }
-        
-        if len(chunk_episodes) == 0:
-            print()
-            continue
-        
-        # Combine all patients in chunk
-        chunk_with_episodes = pd.concat(chunk_episodes, ignore_index=True)
-        
-        # Extract diagnosis codes for each visit
-        def get_all_dx_codes(row):
-            codes = []
-            for dx_col in ['DX1', 'DX2', 'DX3', 'DX4']:
-                val = row[dx_col]
-                if pd.notna(val) and val != '' and val != ' ':
-                    code = str(val)[:DX_DIGITS]
-                    codes.append(code)
-            return codes
-        
-        chunk_with_episodes['dx_codes'] = chunk_with_episodes.apply(get_all_dx_codes, axis=1)
-        
-        # Aggregate to episode level
-        episode_summary = chunk_with_episodes.groupby(['ENROLID', 'EPISODEID']).agg({
-            'SVCDATE': ['nunique', 'min', 'max'],
-            'NETPAY': 'sum',
-            'dx_codes': lambda x: sorted(list(set([code for sublist in x for code in sublist])))
-        }).reset_index()
-        
-        episode_summary.columns = ['ENROLID', 'EPISODEID', 'UNIQUE_DATES', 
-                                   'EARLIEST_DATE', 'LATEST_DATE', 'TOTAL_COST', 'UNIQUE_DX_CODES']
-        
-        # Convert diagnosis codes list to comma-separated string
-        episode_summary['UNIQUE_DX_CODES'] = episode_summary['UNIQUE_DX_CODES'].apply(
-            lambda x: ','.join(x) if len(x) > 0 else ''
-        )
-        
-        print(f"-> {len(episode_summary):,} episodes")
-        
-        # Save to file
-        if first_write:
-            episode_summary.to_csv(output_file, index=False, mode='w')
-            first_write = False
+
+    return df
+
+def aggregate_episodes_fast(df):
+    """
+    ULTRA-OPTIMIZED: Fast aggregation using built-in functions.
+    """
+    # Group once
+    grouped = df.groupby(['ENROLID', 'episode_id'], sort=False)
+
+    # Basic aggregations (fast)
+    agg_result = grouped.agg({
+        'SVCDATE': ['nunique', 'min', 'max'],
+        'PAY': 'sum'
+    })
+
+    # Flatten column names
+    agg_result.columns = ['UNIQUE_DATES', 'EARLIEST_DATE', 'LATEST_DATE', 'TOTAL_COST']
+    agg_result.reset_index(inplace=True)
+
+    # Diagnosis codes - efficient string concatenation
+    # Stack all dx columns into long format
+    dx_cols = ['DX1', 'DX2', 'DX3', 'DX4']
+    dx_long = df[['ENROLID', 'episode_id'] + dx_cols].melt(
+        id_vars=['ENROLID', 'episode_id'],
+        value_vars=dx_cols,
+        value_name='dx_code'
+    )
+
+    # Remove nulls and get unique codes per episode
+    dx_long = dx_long[dx_long['dx_code'].notna()]
+    dx_unique = dx_long.groupby(['ENROLID', 'episode_id'], sort=False)['dx_code'].apply(
+        lambda x: ','.join(sorted(set(x)))
+    ).reset_index()
+    dx_unique.columns = ['ENROLID', 'episode_id', 'UNIQUE_DX_CODES']
+
+    # Merge back
+    result = agg_result.merge(dx_unique, on=['ENROLID', 'episode_id'], how='left')
+    result['UNIQUE_DX_CODES'].fillna('', inplace=True)
+
+    return result
+
+def process_year_optimized(year):
+    """
+    ULTRA-OPTIMIZED: Single year processing.
+    """
+    start_time = time.time()
+    process = psutil.Process()
+    initial_memory = process.memory_info().rss / (1024**3)
+    peak_memory = initial_memory
+
+    conn = duckdb.connect()
+    conn.execute(f"SET temp_directory='{temp_dir}'")
+    conn.execute("SET memory_limit='3GB'")
+    conn.execute("SET threads=2")
+
+    print(f"\n[{year}] Starting | Memory: {initial_memory:.2f} GB")
+
+    output_file = os.path.join(output_dir, f'episode_summary_{year}_sample{SAMPLE_SIZE}.csv')
+    file_path = f"/data/MarketScan_data/{DATASET_TYPE}/{DATABASE}_{TABLE_CODE}_{year}.parquet"
+
+    # Get and sample patients
+    try:
+        all_patients = conn.execute(f"""
+            SELECT DISTINCT ENROLID FROM '{file_path}' WHERE ENROLID IS NOT NULL
+        """).df()['ENROLID'].values
+
+        print(f"[{year}] Found {len(all_patients):,} patients")
+
+        year_seed = 42 + int(year)
+        np.random.seed(year_seed)
+
+        if SAMPLE_SIZE and len(all_patients) > SAMPLE_SIZE:
+            patients = np.random.choice(all_patients, size=SAMPLE_SIZE, replace=False)
+            print(f"[{year}] Sampled {SAMPLE_SIZE:,} patients")
         else:
-            episode_summary.to_csv(output_file, index=False, mode='a', header=False)
-        
-        # Clear memory
-        del chunk_df, chunk_episodes, chunk_with_episodes, episode_summary
-    
-    # Update patient state for next year
-    patient_state = new_patient_state
-    print(f"\n  Patients with carryover to next year: {len(patient_state):,}")
+            patients = all_patients
+    except Exception as e:
+        print(f"[{year}] Error: {e}")
+        conn.close()
+        return None
 
-print(f"\n{'='*100}")
-print("PROCESSING COMPLETE")
-print(f"{'='*100}")
+    # Process in chunks
+    chunks = [patients[i:i + PATIENT_CHUNK_SIZE] for i in range(0, len(patients), PATIENT_CHUNK_SIZE)]
+    print(f"[{year}] Processing {len(chunks)} chunks\n")
 
-# Read final results for summary statistics
-print("\nLoading final results for summary...")
-final_results = pd.read_csv(output_file)
+    first_write = True
+    total_episodes = 0
 
-print(f"\nFinal Dataset Summary:")
-print(f"  Total episodes: {len(final_results):,}")
-print(f"  Total patients: {final_results['ENROLID'].nunique():,}")
-print(f"  Total cost: ${final_results['TOTAL_COST'].sum():,.2f}")
-print(f"\nUnique dates per episode:")
-print(final_results['UNIQUE_DATES'].describe())
-print(f"\nCost per episode:")
-print(final_results['TOTAL_COST'].describe())
-print(f"\nSample of episodes with most unique dates:")
-print(final_results.nlargest(5, 'UNIQUE_DATES')[['ENROLID', 'EPISODEID', 'UNIQUE_DATES', 
-                                                   'EARLIEST_DATE', 'LATEST_DATE', 
-                                                   'TOTAL_COST', 'UNIQUE_DX_CODES']])
+    for chunk_idx, patient_chunk in enumerate(chunks, 1):
+        chunk_start = time.time()
 
-print(f"\nOutput saved to: {output_file}")
-print(f"Columns: {list(final_results.columns)}")
+        current_memory = process.memory_info().rss / (1024**3)
+        peak_memory = max(peak_memory, current_memory)
 
-conn.close()
-print("\nAnalysis complete!")
+        # Progress
+        if chunk_idx > 1:
+            elapsed = time.time() - start_time
+            rate = chunk_idx / elapsed * 60
+            eta = (len(chunks) - chunk_idx) / rate if rate > 0 else 0
+            print(f"[{year}] Chunk {chunk_idx}/{len(chunks)} | Mem: {current_memory:.1f}GB | "
+                  f"Rate: {rate:.1f}/min | ETA: {eta:.1f}m")
+        else:
+            print(f"[{year}] Chunk {chunk_idx}/{len(chunks)} | Mem: {current_memory:.1f}GB")
+
+        patient_list = ','.join(map(str, map(int, patient_chunk)))
+
+        # Load data - ONLY essential columns
+        try:
+            chunk_df = conn.execute(f"""
+                SELECT ENROLID, SVCDATE, DX1, DX2, DX3, DX4, PAY
+                FROM '{file_path}'
+                WHERE ENROLID IN ({patient_list}) AND SVCDATE IS NOT NULL
+            """).df()
+        except Exception as e:
+            print(f"[{year}] Error loading chunk {chunk_idx}: {e}")
+            continue
+
+        if len(chunk_df) == 0:
+            continue
+
+        # Convert types
+        chunk_df['SVCDATE'] = pd.to_datetime(chunk_df['SVCDATE'], errors='coerce')
+        chunk_df['PAY'] = pd.to_numeric(chunk_df['PAY'], errors='coerce').fillna(0)
+        chunk_df.dropna(subset=['SVCDATE'], inplace=True)
+
+        # Define episodes
+        chunk_df = define_episodes_optimized(chunk_df, DX_DIGITS, TIME_WINDOW_DAYS)
+
+        # Aggregate
+        episodes = aggregate_episodes_fast(chunk_df)
+        episodes['YEAR'] = year
+
+        # Reorder
+        episodes = episodes[['ENROLID', 'episode_id', 'YEAR', 'UNIQUE_DATES',
+                            'EARLIEST_DATE', 'LATEST_DATE', 'TOTAL_COST', 'UNIQUE_DX_CODES']]
+        episodes.columns = ['ENROLID', 'EPISODE_ID', 'YEAR', 'UNIQUE_DATES',
+                           'EARLIEST_DATE', 'LATEST_DATE', 'TOTAL_COST', 'UNIQUE_DX_CODES']
+
+        # Save
+        episodes.to_csv(output_file, index=False, mode='w' if first_write else 'a', header=first_write)
+        first_write = False
+
+        total_episodes += len(episodes)
+        chunk_time = time.time() - chunk_start
+        print(f"         → {len(episodes):,} episodes in {chunk_time:.1f}s")
+
+        # Cleanup
+        del chunk_df, episodes
+        gc.collect()
+
+    conn.close()
+
+    total_time = time.time() - start_time
+    file_size = os.path.getsize(output_file) / (1024**2) if os.path.exists(output_file) else 0
+
+    print(f"\n[{year}] ✓ COMPLETE!")
+    print(f"  Time: {total_time/60:.1f} min | Peak Mem: {peak_memory:.1f} GB")
+    print(f"  Episodes: {total_episodes:,} | File: {file_size:.1f} MB")
+
+    return output_file
+
+if __name__ == '__main__':
+    overall_start = time.time()
+
+    output_files = []
+
+    # Process each year and save after completion
+    for year in YEARS:
+        print(f"\n{'='*100}")
+        print(f"PROCESSING YEAR: {year}")
+        print(f"{'='*100}")
+
+        output_file = process_year_optimized(year)
+
+        if output_file and os.path.exists(output_file):
+            output_files.append(output_file)
+            print(f"\n✓ Year {year} saved: {output_file}")
+        else:
+            print(f"\n✗ Year {year} failed to process")
+
+    overall_time = time.time() - overall_start
+
+    print(f"\n{'='*100}")
+    print(f"ALL YEARS COMPLETE")
