@@ -11,7 +11,7 @@ import gc
 DATASET_TYPE = "MEDICARE_SET_A"
 DATABASE = "MDCR"
 TABLE_CODE = "O"
-YEARS = [str(year) for year in range(2014, 2014)]  # 2014-2024
+YEARS = [str(year) for year in range(2014, 2015)]  # 1 year 
 
 # Episode definition parameters
 DX_DIGITS = 3
@@ -134,11 +134,11 @@ def aggregate_episodes_fast(df):
     # Basic aggregations (fast)
     agg_result = grouped.agg({
         'SVCDATE': ['nunique', 'min', 'max'],
-        'PAY': 'sum'
+        'COB': 'sum'
     })
 
     # Flatten column names
-    agg_result.columns = ['UNIQUE_DATES', 'EARLIEST_DATE', 'LATEST_DATE', 'TOTAL_COST']
+    agg_result.columns = ['UNIQUE_DATES', 'EARLIEST_DATE', 'LATEST_DATE', 'TOTAL_COB']
     agg_result.reset_index(inplace=True)
 
     # Diagnosis codes - efficient string concatenation
@@ -185,7 +185,8 @@ def process_year_optimized(year):
     # Get and sample patients
     try:
         all_patients = conn.execute(f"""
-            SELECT DISTINCT ENROLID FROM '{file_path}' WHERE ENROLID IS NOT NULL
+            SELECT DISTINCT ENROLID FROM '{file_path}' 
+            WHERE ENROLID IS NOT NULL AND DATATYP = 3
         """).df()['ENROLID'].values
 
         print(f"[{year}] Found {len(all_patients):,} patients")
@@ -228,12 +229,14 @@ def process_year_optimized(year):
 
         patient_list = ','.join(map(str, map(int, patient_chunk)))
 
-        # Load data - ONLY essential columns
+        # Load data - ONLY essential columns, filtered by DATATYP = 3
         try:
             chunk_df = conn.execute(f"""
-                SELECT ENROLID, SVCDATE, DX1, DX2, DX3, DX4, PAY
+                SELECT ENROLID, SVCDATE, DX1, DX2, DX3, DX4, COB
                 FROM '{file_path}'
-                WHERE ENROLID IN ({patient_list}) AND SVCDATE IS NOT NULL
+                WHERE ENROLID IN ({patient_list}) 
+                  AND SVCDATE IS NOT NULL 
+                  AND DATATYP = 3
             """).df()
         except Exception as e:
             print(f"[{year}] Error loading chunk {chunk_idx}: {e}")
@@ -244,7 +247,7 @@ def process_year_optimized(year):
 
         # Convert types
         chunk_df['SVCDATE'] = pd.to_datetime(chunk_df['SVCDATE'], errors='coerce')
-        chunk_df['PAY'] = pd.to_numeric(chunk_df['PAY'], errors='coerce').fillna(0)
+        chunk_df['COB'] = pd.to_numeric(chunk_df['COB'], errors='coerce').fillna(0)
         chunk_df.dropna(subset=['SVCDATE'], inplace=True)
 
         # Define episodes
@@ -256,9 +259,9 @@ def process_year_optimized(year):
 
         # Reorder
         episodes = episodes[['ENROLID', 'episode_id', 'YEAR', 'UNIQUE_DATES',
-                            'EARLIEST_DATE', 'LATEST_DATE', 'TOTAL_COST', 'UNIQUE_DX_CODES']]
+                            'EARLIEST_DATE', 'LATEST_DATE', 'TOTAL_COB', 'UNIQUE_DX_CODES']]
         episodes.columns = ['ENROLID', 'EPISODE_ID', 'YEAR', 'UNIQUE_DATES',
-                           'EARLIEST_DATE', 'LATEST_DATE', 'TOTAL_COST', 'UNIQUE_DX_CODES']
+                           'EARLIEST_DATE', 'LATEST_DATE', 'TOTAL_COB', 'UNIQUE_DX_CODES']
 
         # Save
         episodes.to_csv(output_file, index=False, mode='w' if first_write else 'a', header=first_write)
