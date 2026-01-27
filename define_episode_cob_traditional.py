@@ -195,7 +195,7 @@ def process_year_parallel(year):
     
     print(f"\n[{year}] Starting | Initial Memory: {initial_memory:.2f} GB")
     
-    file_path = f"/data/MarketScan_data/{DATASET_TYPE}/{DATABASE}_{TABLE_CODE}_{year}.parquet"
+    file_path = f"/data/MarketScan_data/{DATASET_TYPE}/{DATABASE}_{TABLE_CODE}_update_{year}.parquet"
     
     # Check if file exists
     if not os.path.exists(file_path):
