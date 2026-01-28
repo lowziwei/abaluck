@@ -153,7 +153,7 @@ def process_patient_chunk(args):
               AND SVCDATE IS NOT NULL 
               AND DATATYP = 3
               AND COB IS NOT NULL
-              AND MEDADV !=1
+              AND MEDADV = 0
         """).df()
         
         conn.close()
