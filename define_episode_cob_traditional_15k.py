@@ -43,10 +43,10 @@ os.makedirs(temp_dir, exist_ok=True)
 np.random.seed(42)
 
 # Define facility vs non-facility place of service codes
-FACILITY_POS = {21, 22, 23, 24, 26, 31, 32, 33, 34, 51, 52, 53, 54, 55, 56, 61}
-NON_FACILITY_POS = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 
-                    19, 20, 25, 27, 28, 35, 41, 42, 49, 50, 57, 60, 62, 65, 71, 72, 
-                    81, 95, 98, 99}
+FACILITY_POS = {2, 19, 21, 22, 23, 24, 26, 31, 34, 41, 42, 51, 52, 53, 56, 61}
+NON_FACILITY_POS = {1, 3, 4, 11, 12, 13, 14, 15, 16, 17, 20, 25, 32, 33, 49, 50, 54, 55, 57, 60, 62, 65, 71, 72 , 81, 99}
+# NEITHER category - will use average of facility and non-facility PE RVU
+# 10, 18, 27, 35, 58, 95
 
 print("="*100)
 print("EPISODE EXPENDITURE ANALYSIS WITH RVU DATA")
