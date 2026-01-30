@@ -73,44 +73,73 @@ def create_rvu_analysis(df, year):
     
     print(f"  [{year}] Episodes after 95th percentile truncation: {len(df_truncated):,}")
     
-    # ===== FIGURE 1: Full scatterplot + Truncated scatterplot =====
+    # ===== FIGURE 1: Binscatter - Full data + Truncated =====
     fig1, axes1 = plt.subplots(1, 2, figsize=(16, 6))
     
-    # Panel A: Full data
-    axes1[0].scatter(df_analysis['Work_MP_RVU'], df_analysis['Total_RVU'], 
-                     alpha=0.3, s=1, c='blue')
+    # Panel A: Full data binscatter
+    n_bins = 50
+    
+    # Create bins for Work_MP_RVU
+    df_analysis_sorted = df_analysis.sort_values('Work_MP_RVU')
+    df_analysis_sorted['bin'] = pd.qcut(df_analysis_sorted['Work_MP_RVU'], 
+                                          q=n_bins, 
+                                          labels=False, 
+                                          duplicates='drop')
+    
+    # Calculate mean within each bin
+    bin_means = df_analysis_sorted.groupby('bin').agg({
+        'Work_MP_RVU': 'mean',
+        'Total_RVU': 'mean'
+    }).reset_index()
+    
+    # Plot binscatter
+    axes1[0].scatter(bin_means['Work_MP_RVU'], bin_means['Total_RVU'], 
+                     s=50, c='blue', alpha=0.7)
     axes1[0].set_xlabel('Work RVU + Malpractice RVU', fontsize=11)
     axes1[0].set_ylabel('Total RVU (Work + MP + PE)', fontsize=11)
-    axes1[0].set_title(f'{year}: Total RVU vs (Work + MP) RVU - Full Data\nn={len(df_analysis):,} episodes', 
+    axes1[0].set_title(f'{year}: Total RVU vs (Work + MP) RVU - Full Data (Binscatter)\n{n_bins} bins, n={len(df_analysis):,} episodes', 
                        fontsize=12, fontweight='bold')
     axes1[0].grid(True, alpha=0.3)
     
-    # Add 45-degree line (where Total = Work + MP, i.e., PE = 0)
-    max_val = max(df_analysis['Work_MP_RVU'].max(), df_analysis['Total_RVU'].max())
+    # Add 45-degree line
+    max_val = max(bin_means['Work_MP_RVU'].max(), bin_means['Total_RVU'].max())
     axes1[0].plot([0, max_val], [0, max_val], 'r--', linewidth=1, alpha=0.5, 
                   label='Total = Work + MP (PE = 0)')
     axes1[0].legend()
     
-    # Panel B: Truncated at 95th percentile
-    axes1[1].scatter(df_truncated['Work_MP_RVU'], df_truncated['Total_RVU'], 
-                     alpha=0.3, s=1, c='green')
+    # Panel B: Truncated at 95th percentile binscatter
+    df_truncated_sorted = df_truncated.sort_values('Work_MP_RVU')
+    df_truncated_sorted['bin'] = pd.qcut(df_truncated_sorted['Work_MP_RVU'], 
+                                           q=n_bins, 
+                                           labels=False, 
+                                           duplicates='drop')
+    
+    # Calculate mean within each bin
+    bin_means_trunc = df_truncated_sorted.groupby('bin').agg({
+        'Work_MP_RVU': 'mean',
+        'Total_RVU': 'mean'
+    }).reset_index()
+    
+    # Plot binscatter
+    axes1[1].scatter(bin_means_trunc['Work_MP_RVU'], bin_means_trunc['Total_RVU'], 
+                     s=50, c='green', alpha=0.7)
     axes1[1].set_xlabel('Work RVU + Malpractice RVU', fontsize=11)
     axes1[1].set_ylabel('Total RVU (Work + MP + PE)', fontsize=11)
-    axes1[1].set_title(f'{year}: Total RVU vs (Work + MP) RVU - 95th Percentile Truncated\nn={len(df_truncated):,} episodes', 
+    axes1[1].set_title(f'{year}: Total RVU vs (Work + MP) RVU - 95th Percentile Truncated (Binscatter)\n{n_bins} bins, n={len(df_truncated):,} episodes', 
                        fontsize=12, fontweight='bold')
     axes1[1].grid(True, alpha=0.3)
     
     # Add 45-degree line
-    max_val_trunc = max(df_truncated['Work_MP_RVU'].max(), df_truncated['Total_RVU'].max())
+    max_val_trunc = max(bin_means_trunc['Work_MP_RVU'].max(), bin_means_trunc['Total_RVU'].max())
     axes1[1].plot([0, max_val_trunc], [0, max_val_trunc], 'r--', linewidth=1, alpha=0.5,
                   label='Total = Work + MP (PE = 0)')
     axes1[1].legend()
     
     plt.tight_layout()
-    scatter_file = os.path.join(output_dir, f'rvu_scatterplot_{year}.png')
+    scatter_file = os.path.join(output_dir, f'rvu_binscatter_{year}.png')
     plt.savefig(scatter_file, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"  ✓ Scatterplots saved to: {scatter_file}")
+    print(f"  ✓ Binscatters saved to: {scatter_file}")
     
     # ===== FIGURE 2: Histograms of Allowed Amount (PAY) =====
     fig2, axes2 = plt.subplots(1, 2, figsize=(14, 6))
