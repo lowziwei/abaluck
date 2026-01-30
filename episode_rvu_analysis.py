@@ -193,7 +193,7 @@ def create_rvu_analysis(df, year):
     axes3[1].hist(work_mp_10, bins=50, edgecolor='black', alpha=0.7, color='orange')
     axes3[1].set_xlabel('Work RVU + Malpractice RVU per Episode', fontsize=11)
     axes3[1].set_ylabel('Frequency', fontsize=11)
-    axes3[1].set_title(f'{year}: Work + MP RVU - Lower Tail (0-10th percentile)\nChecking for bunching at visit cost\nn={len(work_mp_10):,} episodes', 
+    axes3[1].set_title(f'{year}: Work + MP RVU - Lower Tail (0-10th percentile)\nn={len(work_mp_10):,} episodes', 
                        fontsize=12, fontweight='bold')
     
     # Mark the minimum value (potential bunching point)
