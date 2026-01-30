@@ -44,9 +44,8 @@ np.random.seed(42)
 
 # Define facility vs non-facility place of service codes
 FACILITY_POS = {2, 19, 21, 22, 23, 24, 26, 31, 34, 41, 42, 51, 52, 53, 56, 61}
-NON_FACILITY_POS = {1, 3, 4, 11, 12, 13, 14, 15, 16, 17, 20, 25, 32, 33, 49, 50, 54, 55, 57, 60, 62, 65, 71, 72 , 81, 99}
-# NEITHER category - will use average of facility and non-facility PE RVU
-# 10, 18, 27, 35, 58, 95
+NON_FACILITY_POS = {1, 3, 4, 11, 12, 13, 14, 15, 16, 17, 20, 25, 32, 33, 49, 50, 54, 55, 57, 60, 62, 65, 71, 72, 81, 99}
+# NEITHER category (automatically averaged): 10, 18, 27, 35, 58, 95
 
 print("="*100)
 print("EPISODE EXPENDITURE ANALYSIS WITH RVU DATA")
@@ -57,6 +56,7 @@ if SAMPLE_SIZE:
 else:
     print("SAMPLING: Processing ALL patients (no sampling)")
 print(f"Episode Definition: {DX_DIGITS}-digit DX codes, {TIME_WINDOW_DAYS}-day window")
+print(f"Output format: CSV")
 print("="*100)
 
 def load_rvu_data(year):
@@ -65,11 +65,16 @@ def load_rvu_data(year):
     rvu_path = RVU_BASE_PATH.replace('XX', year_suffix)
     
     try:
-        rvu_df = pd.read_csv(rvu_path)
+        # Use latin-1 encoding which handles all bytes (0-255)
+        rvu_df = pd.read_csv(rvu_path, encoding='latin-1')
         
-        # Rename HCPS to PROC1 if needed
-        if 'HCPS' in rvu_df.columns and 'PROC1' not in rvu_df.columns:
+        # Rename HCPS to PROC1 for merging
+        if 'HCPS' in rvu_df.columns:
             rvu_df = rvu_df.rename(columns={'HCPS': 'PROC1'})
+        
+        # Clean PROC1
+        if 'PROC1' in rvu_df.columns:
+            rvu_df['PROC1'] = rvu_df['PROC1'].astype(str).str.strip()
         
         print(f"  [{year}] Loaded RVU data: {len(rvu_df):,} codes")
         return rvu_df
@@ -79,6 +84,8 @@ def load_rvu_data(year):
         return None
     except Exception as e:
         print(f"  [{year}] ERROR loading RVU data: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def define_episodes_optimized(df, dx_digits=3, time_window_days=100):
@@ -237,18 +244,11 @@ def process_patient_chunk(args):
             if 'STDPLAC' in chunk_df.columns:
                 chunk_df['PE_RVU_actualized'] = np.nan
                 
-                # Find PE RVU columns (try different naming conventions)
-                pe_facility_col = None
-                pe_nonfacility_col = None
+                # Use exact column names from RVU file
+                pe_facility_col = 'FACILITY_PE_RVU'
+                pe_nonfacility_col = 'NON-FAC_PE_RVU'
                 
-                for col in chunk_df.columns:
-                    col_lower = col.lower()
-                    if 'pe' in col_lower and 'facility' in col_lower and 'non' not in col_lower:
-                        pe_facility_col = col
-                    elif 'pe' in col_lower and ('nonfacility' in col_lower or 'non_facility' in col_lower):
-                        pe_nonfacility_col = col
-                
-                if pe_facility_col and pe_nonfacility_col:
+                if pe_facility_col in chunk_df.columns and pe_nonfacility_col in chunk_df.columns:
                     # Convert to numeric
                     chunk_df[pe_facility_col] = pd.to_numeric(chunk_df[pe_facility_col], errors='coerce')
                     chunk_df[pe_nonfacility_col] = pd.to_numeric(chunk_df[pe_nonfacility_col], errors='coerce')
@@ -275,7 +275,7 @@ def process_patient_chunk(args):
         # Define episodes
         chunk_df = define_episodes_optimized(chunk_df, DX_DIGITS, TIME_WINDOW_DAYS)
         
-        # Prepare aggregation dictionary
+        # Prepare aggregation dictionary with EXACT column names
         agg_dict = {}
         
         # Add payment columns
@@ -283,16 +283,17 @@ def process_patient_chunk(args):
             if col in chunk_df.columns:
                 agg_dict[col] = 'sum'
         
-        # Add RVU columns if they exist
-        if 'PE_RVU_actualized' in chunk_df.columns:
-            agg_dict['PE_RVU_actualized'] = 'sum'
+        # Add RVU columns with exact names from your RVU file
+        rvu_cols_to_aggregate = [
+            'PE_RVU_actualized',    # Calculated column
+            'WORK_RVU',             # From RVU file
+            'MP_RVU',               # From RVU file
+            'FACILITY_PE_RVU',      # From RVU file
+            'NON-FAC_PE_RVU'        # From RVU file
+        ]
         
-        # Find Work RVU and MP RVU columns
-        for col in chunk_df.columns:
-            col_lower = col.lower()
-            if 'work' in col_lower and 'rvu' in col_lower and col not in agg_dict:
-                agg_dict[col] = 'sum'
-            elif ('mp' in col_lower or 'malpractice' in col_lower) and 'rvu' in col_lower and col not in agg_dict:
+        for col in rvu_cols_to_aggregate:
+            if col in chunk_df.columns:
                 agg_dict[col] = 'sum'
         
         # Aggregate at episode level
@@ -401,6 +402,7 @@ def process_year_parallel(year):
     print(f"\n[{year}] ✓ COMPLETE!")
     print(f"  Time: {total_time/60:.1f} minutes")
     print(f"  Total Episodes: {len(combined_df):,}")
+    print(f"  Columns in output: {combined_df.columns.tolist()}")
     
     # Print summary for all payment columns
     payment_cols = ['COB', 'COINS', 'COPAY', 'DEDUCT', 'NETPAY', 'PAY']
@@ -410,13 +412,7 @@ def process_year_parallel(year):
             print(f"  Mean {col}: ${combined_df[col].mean():,.2f}")
     
     # Print RVU summary if available
-    rvu_cols = ['PE_RVU_actualized']
-    for col in combined_df.columns:
-        col_lower = col.lower()
-        if 'work' in col_lower and 'rvu' in col_lower:
-            rvu_cols.append(col)
-        elif ('mp' in col_lower or 'malpractice' in col_lower) and 'rvu' in col_lower:
-            rvu_cols.append(col)
+    rvu_cols = ['PE_RVU_actualized', 'WORK_RVU', 'MP_RVU', 'FACILITY_PE_RVU', 'NON-FAC_PE_RVU']
     
     for col in rvu_cols:
         if col in combined_df.columns:
@@ -569,14 +565,14 @@ def create_histograms(df, year):
 
 def save_episode_data(df, year):
     """
-    Save the episode-level data with RVU information.
+    Save the episode-level data with RVU information as CSV.
     """
     print(f"\n[{year}] Saving episode-level data...")
     
-    # Save as parquet for efficiency
+    # Save as CSV
     sample_suffix = f"_sample{SAMPLE_SIZE}" if SAMPLE_SIZE else "_all"
-    episode_file = os.path.join(output_dir, f'episodes_{year}{sample_suffix}.parquet')
-    df.to_parquet(episode_file, index=False)
+    episode_file = os.path.join(output_dir, f'episodes_{year}{sample_suffix}.csv')
+    df.to_csv(episode_file, index=False)
     
     file_size = os.path.getsize(episode_file) / (1024**2)
     print(f"  Episode data saved to: {episode_file} ({file_size:.1f} MB)")
@@ -673,5 +669,5 @@ if __name__ == '__main__':
     print(f"  ✓ expenditure_statistics_YYYY.csv (per year)")
     print(f"  ✓ expenditure_statistics_all_years{sample_suffix}.csv (combined)")
     print(f"  ✓ expenditure_histograms_YYYY.png (per year - 2 panels)")
-    print(f"  ✓ episodes_YYYY{sample_suffix}.parquet (episode-level data with RVUs)")
+    print(f"  ✓ episodes_YYYY{sample_suffix}.csv (episode-level data with RVUs)")
     print("="*100)
