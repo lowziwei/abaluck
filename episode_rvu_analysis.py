@@ -26,10 +26,11 @@ print("="*100)
 def create_rvu_analysis(df, year):
     """
     Create RVU analysis graphs:
-    1. Scatterplot: Total RVU vs (Work RVU + MP RVU)
-    2. Same plot truncated at 95th percentile
+    1. Binscatter: Total RVU vs (Work + MP) RVU (full and truncated)
+    2. Binscatter: PAY vs Total RVU (full and truncated)
     3. Histograms of allowed amount (PAY)
-    4. Histograms of (Work RVU + MP RVU) - checking for bunching at lower bound
+    4. Histograms of (Work RVU + MP RVU)
+    5. Histograms of Total RVU
     """
     if df is None or len(df) == 0:
         print(f"[{year}] WARNING: No data for RVU analysis")
@@ -73,98 +74,140 @@ def create_rvu_analysis(df, year):
     
     print(f"  [{year}] Episodes after 95th percentile truncation: {len(df_truncated):,}")
     
-    # ===== FIGURE 1: Binscatter - Full data + Truncated =====
+    # ===== FIGURE 1: Binscatter - Work + MP RVU =====
     fig1, axes1 = plt.subplots(1, 2, figsize=(16, 6))
     
-    # Panel A: Full data binscatter
     n_bins = 50
     
-    # Create bins for Work_MP_RVU
+    # Panel A: Full data binscatter (Work + MP)
     df_analysis_sorted = df_analysis.sort_values('Work_MP_RVU')
-    df_analysis_sorted['bin'] = pd.qcut(df_analysis_sorted['Work_MP_RVU'], 
-                                          q=n_bins, 
-                                          labels=False, 
-                                          duplicates='drop')
+    df_analysis_sorted['bin_workmp'] = pd.qcut(df_analysis_sorted['Work_MP_RVU'], 
+                                                 q=n_bins, 
+                                                 labels=False, 
+                                                 duplicates='drop')
     
-    # Calculate mean within each bin
-    bin_means = df_analysis_sorted.groupby('bin').agg({
+    bin_means_workmp = df_analysis_sorted.groupby('bin_workmp').agg({
         'Work_MP_RVU': 'mean',
         'Total_RVU': 'mean'
     }).reset_index()
     
-    # Plot binscatter
-    axes1[0].scatter(bin_means['Work_MP_RVU'], bin_means['Total_RVU'], 
+    axes1[0].scatter(bin_means_workmp['Work_MP_RVU'], bin_means_workmp['Total_RVU'], 
                      s=50, c='blue', alpha=0.7)
     axes1[0].set_xlabel('Work RVU + Malpractice RVU', fontsize=11)
     axes1[0].set_ylabel('Total RVU (Work + MP + PE)', fontsize=11)
-    axes1[0].set_title(f'{year}: Total RVU vs (Work + MP) RVU - Full Data (Binscatter)\n{n_bins} bins, n={len(df_analysis):,} episodes', 
+    axes1[0].set_title(f'{year}: Total RVU vs (Work + MP) RVU - Full Data\n{len(bin_means_workmp)} bins, n={len(df_analysis):,} episodes', 
                        fontsize=12, fontweight='bold')
     axes1[0].grid(True, alpha=0.3)
     
-    # Add 45-degree line
-    max_val = max(bin_means['Work_MP_RVU'].max(), bin_means['Total_RVU'].max())
+    max_val = max(bin_means_workmp['Work_MP_RVU'].max(), bin_means_workmp['Total_RVU'].max())
     axes1[0].plot([0, max_val], [0, max_val], 'r--', linewidth=1, alpha=0.5, 
                   label='Total = Work + MP (PE = 0)')
     axes1[0].legend()
     
-    # Panel B: Truncated at 95th percentile binscatter
+    # Panel B: Truncated at 95th percentile (Work + MP)
     df_truncated_sorted = df_truncated.sort_values('Work_MP_RVU')
-    df_truncated_sorted['bin'] = pd.qcut(df_truncated_sorted['Work_MP_RVU'], 
-                                           q=n_bins, 
-                                           labels=False, 
-                                           duplicates='drop')
+    df_truncated_sorted['bin_workmp'] = pd.qcut(df_truncated_sorted['Work_MP_RVU'], 
+                                                  q=n_bins, 
+                                                  labels=False, 
+                                                  duplicates='drop')
     
-    # Calculate mean within each bin
-    bin_means_trunc = df_truncated_sorted.groupby('bin').agg({
+    bin_means_workmp_trunc = df_truncated_sorted.groupby('bin_workmp').agg({
         'Work_MP_RVU': 'mean',
         'Total_RVU': 'mean'
     }).reset_index()
     
-    # Plot binscatter
-    axes1[1].scatter(bin_means_trunc['Work_MP_RVU'], bin_means_trunc['Total_RVU'], 
+    axes1[1].scatter(bin_means_workmp_trunc['Work_MP_RVU'], bin_means_workmp_trunc['Total_RVU'], 
                      s=50, c='green', alpha=0.7)
     axes1[1].set_xlabel('Work RVU + Malpractice RVU', fontsize=11)
     axes1[1].set_ylabel('Total RVU (Work + MP + PE)', fontsize=11)
-    axes1[1].set_title(f'{year}: Total RVU vs (Work + MP) RVU - 95th Percentile Truncated (Binscatter)\n{n_bins} bins, n={len(df_truncated):,} episodes', 
+    axes1[1].set_title(f'{year}: Total RVU vs (Work + MP) RVU - 95th Percentile Truncated\n{len(bin_means_workmp_trunc)} bins, n={len(df_truncated):,} episodes', 
                        fontsize=12, fontweight='bold')
     axes1[1].grid(True, alpha=0.3)
     
-    # Add 45-degree line
-    max_val_trunc = max(bin_means_trunc['Work_MP_RVU'].max(), bin_means_trunc['Total_RVU'].max())
+    max_val_trunc = max(bin_means_workmp_trunc['Work_MP_RVU'].max(), bin_means_workmp_trunc['Total_RVU'].max())
     axes1[1].plot([0, max_val_trunc], [0, max_val_trunc], 'r--', linewidth=1, alpha=0.5,
                   label='Total = Work + MP (PE = 0)')
     axes1[1].legend()
     
     plt.tight_layout()
-    scatter_file = os.path.join(output_dir, f'rvu_binscatter_{year}.png')
-    plt.savefig(scatter_file, dpi=300, bbox_inches='tight')
+    scatter_file_workmp = os.path.join(output_dir, f'rvu_binscatter_workmp_{year}.png')
+    plt.savefig(scatter_file_workmp, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"  ✓ Binscatters saved to: {scatter_file}")
+    print(f"  ✓ Work+MP binscatters saved to: {scatter_file_workmp}")
     
-    # ===== FIGURE 2: Histograms of Allowed Amount (PAY) =====
-    fig2, axes2 = plt.subplots(1, 2, figsize=(14, 6))
+    # ===== FIGURE 2: Binscatter - Total RVU =====
+    fig2, axes2 = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Panel A: Full data binscatter (Total RVU)
+    df_analysis_sorted_total = df_analysis.sort_values('Total_RVU')
+    df_analysis_sorted_total['bin_total'] = pd.qcut(df_analysis_sorted_total['Total_RVU'], 
+                                                      q=n_bins, 
+                                                      labels=False, 
+                                                      duplicates='drop')
+    
+    bin_means_total = df_analysis_sorted_total.groupby('bin_total').agg({
+        'Total_RVU': 'mean',
+        'PAY': 'mean'
+    }).reset_index()
+    
+    axes2[0].scatter(bin_means_total['Total_RVU'], bin_means_total['PAY'], 
+                     s=50, c='purple', alpha=0.7)
+    axes2[0].set_xlabel('Total RVU (Work + MP + PE)', fontsize=11)
+    axes2[0].set_ylabel('Allowed Amount (PAY) ($)', fontsize=11)
+    axes2[0].set_title(f'{year}: PAY vs Total RVU - Full Data\n{len(bin_means_total)} bins, n={len(df_analysis):,} episodes', 
+                       fontsize=12, fontweight='bold')
+    axes2[0].grid(True, alpha=0.3)
+    
+    # Panel B: Truncated at 95th percentile (Total RVU)
+    df_truncated_sorted_total = df_truncated.sort_values('Total_RVU')
+    df_truncated_sorted_total['bin_total'] = pd.qcut(df_truncated_sorted_total['Total_RVU'], 
+                                                       q=n_bins, 
+                                                       labels=False, 
+                                                       duplicates='drop')
+    
+    bin_means_total_trunc = df_truncated_sorted_total.groupby('bin_total').agg({
+        'Total_RVU': 'mean',
+        'PAY': 'mean'
+    }).reset_index()
+    
+    axes2[1].scatter(bin_means_total_trunc['Total_RVU'], bin_means_total_trunc['PAY'], 
+                     s=50, c='orange', alpha=0.7)
+    axes2[1].set_xlabel('Total RVU (Work + MP + PE)', fontsize=11)
+    axes2[1].set_ylabel('Allowed Amount (PAY) ($)', fontsize=11)
+    axes2[1].set_title(f'{year}: PAY vs Total RVU - 95th Percentile Truncated\n{len(bin_means_total_trunc)} bins, n={len(df_truncated):,} episodes', 
+                       fontsize=12, fontweight='bold')
+    axes2[1].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    scatter_file_total = os.path.join(output_dir, f'rvu_binscatter_total_{year}.png')
+    plt.savefig(scatter_file_total, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  ✓ Total RVU binscatters saved to: {scatter_file_total}")
+    
+    # ===== FIGURE 3: Histograms of Allowed Amount (PAY) =====
+    fig3, axes3 = plt.subplots(1, 2, figsize=(14, 6))
     
     # Panel A: Full distribution (0-95th percentile)
     pay_95 = df_analysis[df_analysis['PAY'] <= p95_pay]['PAY']
-    axes2[0].hist(pay_95, bins=100, edgecolor='black', alpha=0.7, color='steelblue')
-    axes2[0].set_xlabel('Allowed Amount (PAY) per Episode ($)', fontsize=11)
-    axes2[0].set_ylabel('Frequency', fontsize=11)
-    axes2[0].set_title(f'{year}: Allowed Amount Distribution (0-95th percentile)\nn={len(pay_95):,} episodes', 
+    axes3[0].hist(pay_95, bins=100, edgecolor='black', alpha=0.7, color='steelblue')
+    axes3[0].set_xlabel('Allowed Amount (PAY) per Episode ($)', fontsize=11)
+    axes3[0].set_ylabel('Frequency', fontsize=11)
+    axes3[0].set_title(f'{year}: Allowed Amount Distribution (0-95th percentile)\nn={len(pay_95):,} episodes', 
                        fontsize=12, fontweight='bold')
-    axes2[0].axvline(np.median(pay_95), color='red', linestyle='--', linewidth=2,
+    axes3[0].axvline(np.median(pay_95), color='red', linestyle='--', linewidth=2,
                      label=f'Median: ${np.median(pay_95):,.2f}')
-    axes2[0].legend()
-    axes2[0].grid(True, alpha=0.3)
+    axes3[0].legend()
+    axes3[0].grid(True, alpha=0.3)
     
     # Panel B: Lower tail (0-10th percentile)
     p10_pay = np.percentile(df_analysis['PAY'], 10)
     pay_10 = df_analysis[df_analysis['PAY'] <= p10_pay]['PAY']
-    axes2[1].hist(pay_10, bins=50, edgecolor='black', alpha=0.7, color='coral')
-    axes2[1].set_xlabel('Allowed Amount (PAY) per Episode ($)', fontsize=11)
-    axes2[1].set_ylabel('Frequency', fontsize=11)
-    axes2[1].set_title(f'{year}: Allowed Amount - Lower Tail (0-10th percentile)\nn={len(pay_10):,} episodes', 
+    axes3[1].hist(pay_10, bins=50, edgecolor='black', alpha=0.7, color='coral')
+    axes3[1].set_xlabel('Allowed Amount (PAY) per Episode ($)', fontsize=11)
+    axes3[1].set_ylabel('Frequency', fontsize=11)
+    axes3[1].set_title(f'{year}: Allowed Amount - Lower Tail (0-10th percentile)\nn={len(pay_10):,} episodes', 
                        fontsize=12, fontweight='bold')
-    axes2[1].grid(True, alpha=0.3)
+    axes3[1].grid(True, alpha=0.3)
     
     plt.tight_layout()
     pay_hist_file = os.path.join(output_dir, f'allowed_amount_histogram_{year}.png')
@@ -172,42 +215,79 @@ def create_rvu_analysis(df, year):
     plt.close()
     print(f"  ✓ Allowed amount histograms saved to: {pay_hist_file}")
     
-    # ===== FIGURE 3: Histograms of Work + MP RVU (checking for bunching) =====
-    fig3, axes3 = plt.subplots(1, 2, figsize=(14, 6))
+    # ===== FIGURE 4: Histograms of Work + MP RVU =====
+    fig4, axes4 = plt.subplots(1, 2, figsize=(14, 6))
     
     # Panel A: Full distribution (0-95th percentile)
     work_mp_95 = df_analysis[df_analysis['Work_MP_RVU'] <= p95_work_mp]['Work_MP_RVU']
-    axes3[0].hist(work_mp_95, bins=100, edgecolor='black', alpha=0.7, color='purple')
-    axes3[0].set_xlabel('Work RVU + Malpractice RVU per Episode', fontsize=11)
-    axes3[0].set_ylabel('Frequency', fontsize=11)
-    axes3[0].set_title(f'{year}: Work + MP RVU Distribution (0-95th percentile)\nn={len(work_mp_95):,} episodes', 
+    axes4[0].hist(work_mp_95, bins=100, edgecolor='black', alpha=0.7, color='purple')
+    axes4[0].set_xlabel('Work RVU + Malpractice RVU per Episode', fontsize=11)
+    axes4[0].set_ylabel('Frequency', fontsize=11)
+    axes4[0].set_title(f'{year}: Work + MP RVU Distribution (0-95th percentile)\nn={len(work_mp_95):,} episodes', 
                        fontsize=12, fontweight='bold')
-    axes3[0].axvline(np.median(work_mp_95), color='red', linestyle='--', linewidth=2,
+    axes4[0].axvline(np.median(work_mp_95), color='red', linestyle='--', linewidth=2,
                      label=f'Median: {np.median(work_mp_95):.2f}')
-    axes3[0].legend()
-    axes3[0].grid(True, alpha=0.3)
+    axes4[0].legend()
+    axes4[0].grid(True, alpha=0.3)
     
-    # Panel B: Lower tail (0-10th percentile) - CHECKING FOR BUNCHING
+    # Panel B: Lower tail (0-10th percentile)
     p10_work_mp = np.percentile(df_analysis['Work_MP_RVU'], 10)
     work_mp_10 = df_analysis[df_analysis['Work_MP_RVU'] <= p10_work_mp]['Work_MP_RVU']
-    axes3[1].hist(work_mp_10, bins=50, edgecolor='black', alpha=0.7, color='orange')
-    axes3[1].set_xlabel('Work RVU + Malpractice RVU per Episode', fontsize=11)
-    axes3[1].set_ylabel('Frequency', fontsize=11)
-    axes3[1].set_title(f'{year}: Work + MP RVU - Lower Tail (0-10th percentile)\nn={len(work_mp_10):,} episodes', 
+    axes4[1].hist(work_mp_10, bins=50, edgecolor='black', alpha=0.7, color='orange')
+    axes4[1].set_xlabel('Work RVU + Malpractice RVU per Episode', fontsize=11)
+    axes4[1].set_ylabel('Frequency', fontsize=11)
+    axes4[1].set_title(f'{year}: Work + MP RVU - Lower Tail (0-10th percentile)\nn={len(work_mp_10):,} episodes', 
                        fontsize=12, fontweight='bold')
     
-    # Mark the minimum value (potential bunching point)
+    # Mark the minimum value
     min_work_mp = work_mp_10.min()
-    axes3[1].axvline(min_work_mp, color='red', linestyle='--', linewidth=2,
+    axes4[1].axvline(min_work_mp, color='red', linestyle='--', linewidth=2,
                      label=f'Min: {min_work_mp:.2f}')
-    axes3[1].legend()
-    axes3[1].grid(True, alpha=0.3)
+    axes4[1].legend()
+    axes4[1].grid(True, alpha=0.3)
     
     plt.tight_layout()
     work_mp_hist_file = os.path.join(output_dir, f'work_mp_rvu_histogram_{year}.png')
     plt.savefig(work_mp_hist_file, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"  ✓ Work + MP RVU histograms saved to: {work_mp_hist_file}")
+    
+    # ===== FIGURE 5: Histograms of Total RVU =====
+    fig5, axes5 = plt.subplots(1, 2, figsize=(14, 6))
+    
+    # Panel A: Full distribution (0-95th percentile)
+    total_rvu_95 = df_analysis[df_analysis['Total_RVU'] <= p95_total]['Total_RVU']
+    axes5[0].hist(total_rvu_95, bins=100, edgecolor='black', alpha=0.7, color='teal')
+    axes5[0].set_xlabel('Total RVU (Work + MP + PE) per Episode', fontsize=11)
+    axes5[0].set_ylabel('Frequency', fontsize=11)
+    axes5[0].set_title(f'{year}: Total RVU Distribution (0-95th percentile)\nn={len(total_rvu_95):,} episodes', 
+                       fontsize=12, fontweight='bold')
+    axes5[0].axvline(np.median(total_rvu_95), color='red', linestyle='--', linewidth=2,
+                     label=f'Median: {np.median(total_rvu_95):.2f}')
+    axes5[0].legend()
+    axes5[0].grid(True, alpha=0.3)
+    
+    # Panel B: Lower tail (0-10th percentile)
+    p10_total = np.percentile(df_analysis['Total_RVU'], 10)
+    total_rvu_10 = df_analysis[df_analysis['Total_RVU'] <= p10_total]['Total_RVU']
+    axes5[1].hist(total_rvu_10, bins=50, edgecolor='black', alpha=0.7, color='darkgreen')
+    axes5[1].set_xlabel('Total RVU (Work + MP + PE) per Episode', fontsize=11)
+    axes5[1].set_ylabel('Frequency', fontsize=11)
+    axes5[1].set_title(f'{year}: Total RVU - Lower Tail (0-10th percentile)\nn={len(total_rvu_10):,} episodes', 
+                       fontsize=12, fontweight='bold')
+    
+    # Mark the minimum value
+    min_total = total_rvu_10.min()
+    axes5[1].axvline(min_total, color='red', linestyle='--', linewidth=2,
+                     label=f'Min: {min_total:.2f}')
+    axes5[1].legend()
+    axes5[1].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    total_rvu_hist_file = os.path.join(output_dir, f'total_rvu_histogram_{year}.png')
+    plt.savefig(total_rvu_hist_file, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  ✓ Total RVU histograms saved to: {total_rvu_hist_file}")
     
     # ===== BUNCHING ANALYSIS =====
     print(f"\n[{year}] BUNCHING ANALYSIS (Work + MP RVU):")
@@ -354,9 +434,11 @@ if __name__ == '__main__':
     print(f"{'='*100}")
     print(f"Output directory: {output_dir}")
     print(f"\nFiles generated per year:")
-    print(f"  ✓ rvu_scatterplot_YYYY.png (Total RVU vs Work+MP, full & truncated)")
+    print(f"  ✓ rvu_binscatter_workmp_YYYY.png (Total RVU vs Work+MP, full & truncated)")
+    print(f"  ✓ rvu_binscatter_total_YYYY.png (PAY vs Total RVU, full & truncated)")
     print(f"  ✓ allowed_amount_histogram_YYYY.png (PAY distribution)")
-    print(f"  ✓ work_mp_rvu_histogram_YYYY.png (Work+MP RVU with bunching analysis)")
+    print(f"  ✓ work_mp_rvu_histogram_YYYY.png (Work+MP RVU distribution)")
+    print(f"  ✓ total_rvu_histogram_YYYY.png (Total RVU distribution)")
     print(f"  ✓ rvu_summary_stats_YYYY.csv (summary statistics)")
     print(f"\nCombined file:")
     print(f"  ✓ rvu_summary_stats_all_years.csv")
