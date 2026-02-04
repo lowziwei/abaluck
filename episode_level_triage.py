@@ -266,6 +266,21 @@ def analyze_year(year):
         # Aggregate to episodes
         episodes_level1 = df_level1.groupby(['ENROLID', 'episode_id']).agg(agg_dict).reset_index()
         
+        # Create TOTPAY = PAY + COPAY + COINS + DEDUCT
+        episodes_level1['TOTPAY'] = (
+            episodes_level1['PAY'] + 
+            episodes_level1['COPAY'] + 
+            episodes_level1['COINS'] + 
+            episodes_level1['DEDUCT']
+        )
+        
+        # Create TOTAL_RVU = sum of all RVU components
+        episodes_level1['TOTAL_RVU'] = 0
+        rvu_components = ['PE_RVU_actualized', 'WORK_RVU', 'MP_RVU']
+        for col in rvu_components:
+            if col in episodes_level1.columns:
+                episodes_level1['TOTAL_RVU'] += episodes_level1[col].fillna(0)
+        
         # Save Level 1 episode dataset
         sample_suffix = f"_sample{SAMPLE_SIZE}" if SAMPLE_SIZE else "_all"
         level1_file = os.path.join(output_dir, f'episodes_level1_{year}{sample_suffix}.csv')
@@ -273,11 +288,24 @@ def analyze_year(year):
         file_size = os.path.getsize(level1_file) / (1024**2)
         print(f"  [{year}] Level 1 episodes saved to: {level1_file} ({file_size:.1f} MB)")
         
-        level1_mean = episodes_level1['PAY'].mean()
-        level1_median = episodes_level1['PAY'].median()
+        # Calculate statistics
+        level1_mean = episodes_level1['TOTPAY'].mean()
+        level1_median = episodes_level1['TOTPAY'].median()
+        level1_min = episodes_level1['TOTPAY'].min()
+        level1_max = episodes_level1['TOTPAY'].max()
+        level1_sd = episodes_level1['TOTPAY'].std()
         level1_n = len(episodes_level1)
+        
+        level1_rvu_mean = episodes_level1['TOTAL_RVU'].mean()
+        level1_rvu_median = episodes_level1['TOTAL_RVU'].median()
+        level1_rvu_min = episodes_level1['TOTAL_RVU'].min()
+        level1_rvu_max = episodes_level1['TOTAL_RVU'].max()
+        level1_rvu_sd = episodes_level1['TOTAL_RVU'].std()
+        level1_rvu_zero_count = (episodes_level1['TOTAL_RVU'] == 0).sum()
     else:
-        level1_mean = level1_median = np.nan
+        level1_mean = level1_median = level1_min = level1_max = level1_sd = np.nan
+        level1_rvu_mean = level1_rvu_median = level1_rvu_min = level1_rvu_max = level1_rvu_sd = np.nan
+        level1_rvu_zero_count = 0
         level1_n = 0
     
     # SCENARIO 2: Level 1+2+3
@@ -302,11 +330,39 @@ def analyze_year(year):
         # Aggregate to episodes
         episodes_level123 = df_level123.groupby(['ENROLID', 'episode_id']).agg(agg_dict).reset_index()
         
-        level123_mean = episodes_level123['PAY'].mean()
-        level123_median = episodes_level123['PAY'].median()
+        # Create TOTPAY = PAY + COPAY + COINS + DEDUCT
+        episodes_level123['TOTPAY'] = (
+            episodes_level123['PAY'] + 
+            episodes_level123['COPAY'] + 
+            episodes_level123['COINS'] + 
+            episodes_level123['DEDUCT']
+        )
+        
+        # Create TOTAL_RVU = sum of all RVU components
+        episodes_level123['TOTAL_RVU'] = 0
+        rvu_components = ['PE_RVU_actualized', 'WORK_RVU', 'MP_RVU']
+        for col in rvu_components:
+            if col in episodes_level123.columns:
+                episodes_level123['TOTAL_RVU'] += episodes_level123[col].fillna(0)
+        
+        # Calculate statistics
+        level123_mean = episodes_level123['TOTPAY'].mean()
+        level123_median = episodes_level123['TOTPAY'].median()
+        level123_min = episodes_level123['TOTPAY'].min()
+        level123_max = episodes_level123['TOTPAY'].max()
+        level123_sd = episodes_level123['TOTPAY'].std()
         level123_n = len(episodes_level123)
+        
+        level123_rvu_mean = episodes_level123['TOTAL_RVU'].mean()
+        level123_rvu_median = episodes_level123['TOTAL_RVU'].median()
+        level123_rvu_min = episodes_level123['TOTAL_RVU'].min()
+        level123_rvu_max = episodes_level123['TOTAL_RVU'].max()
+        level123_rvu_sd = episodes_level123['TOTAL_RVU'].std()
+        level123_rvu_zero_count = (episodes_level123['TOTAL_RVU'] == 0).sum()
     else:
-        level123_mean = level123_median = np.nan
+        level123_mean = level123_median = level123_min = level123_max = level123_sd = np.nan
+        level123_rvu_mean = level123_rvu_median = level123_rvu_min = level123_rvu_max = level123_rvu_sd = np.nan
+        level123_rvu_zero_count = 0
         level123_n = 0
     
     # Clean up
@@ -321,23 +377,47 @@ def analyze_year(year):
     results = {
         'year': year,
         'level_1_n_episodes': level1_n,
-        'level_1_mean_pay': level1_mean,
-        'level_1_median_pay': level1_median,
+        'level_1_mean_totpay': level1_mean,
+        'level_1_median_totpay': level1_median,
+        'level_1_min_totpay': level1_min,
+        'level_1_max_totpay': level1_max,
+        'level_1_sd_totpay': level1_sd,
+        'level_1_mean_rvu': level1_rvu_mean,
+        'level_1_median_rvu': level1_rvu_median,
+        'level_1_min_rvu': level1_rvu_min,
+        'level_1_max_rvu': level1_rvu_max,
+        'level_1_sd_rvu': level1_rvu_sd,
+        'level_1_rvu_zero_count': level1_rvu_zero_count,
         'level_123_n_episodes': level123_n,
-        'level_123_mean_pay': level123_mean,
-        'level_123_median_pay': level123_median,
+        'level_123_mean_totpay': level123_mean,
+        'level_123_median_totpay': level123_median,
+        'level_123_min_totpay': level123_min,
+        'level_123_max_totpay': level123_max,
+        'level_123_sd_totpay': level123_sd,
+        'level_123_mean_rvu': level123_rvu_mean,
+        'level_123_median_rvu': level123_rvu_median,
+        'level_123_min_rvu': level123_rvu_min,
+        'level_123_max_rvu': level123_rvu_max,
+        'level_123_sd_rvu': level123_rvu_sd,
+        'level_123_rvu_zero_count': level123_rvu_zero_count,
     }
     
     print(f"\n[{year}] RESULTS:")
     print(f"  LEVEL 1 ONLY EPISODES:")
     print(f"    N episodes: {results['level_1_n_episodes']:,}")
-    print(f"    Mean PAY: ${results['level_1_mean_pay']:,.2f}")
-    print(f"    Median PAY: ${results['level_1_median_pay']:,.2f}")
+    print(f"    TOTPAY - Mean: ${results['level_1_mean_totpay']:,.2f}, Median: ${results['level_1_median_totpay']:,.2f}")
+    print(f"    TOTPAY - Min: ${results['level_1_min_totpay']:,.2f}, Max: ${results['level_1_max_totpay']:,.2f}, SD: ${results['level_1_sd_totpay']:,.2f}")
+    print(f"    TOTAL_RVU - Mean: {results['level_1_mean_rvu']:,.2f}, Median: {results['level_1_median_rvu']:,.2f}")
+    print(f"    TOTAL_RVU - Min: {results['level_1_min_rvu']:,.2f}, Max: {results['level_1_max_rvu']:,.2f}, SD: {results['level_1_sd_rvu']:,.2f}")
+    print(f"    TOTAL_RVU = 0 count: {results['level_1_rvu_zero_count']:,}")
     
     print(f"\n  LEVEL 1+2+3 EPISODES:")
     print(f"    N episodes: {results['level_123_n_episodes']:,}")
-    print(f"    Mean PAY: ${results['level_123_mean_pay']:,.2f}")
-    print(f"    Median PAY: ${results['level_123_median_pay']:,.2f}")
+    print(f"    TOTPAY - Mean: ${results['level_123_mean_totpay']:,.2f}, Median: ${results['level_123_median_totpay']:,.2f}")
+    print(f"    TOTPAY - Min: ${results['level_123_min_totpay']:,.2f}, Max: ${results['level_123_max_totpay']:,.2f}, SD: ${results['level_123_sd_totpay']:,.2f}")
+    print(f"    TOTAL_RVU - Mean: {results['level_123_mean_rvu']:,.2f}, Median: {results['level_123_median_rvu']:,.2f}")
+    print(f"    TOTAL_RVU - Min: {results['level_123_min_rvu']:,.2f}, Max: {results['level_123_max_rvu']:,.2f}, SD: {results['level_123_sd_rvu']:,.2f}")
+    print(f"    TOTAL_RVU = 0 count: {results['level_123_rvu_zero_count']:,}")
     
     return results
 
