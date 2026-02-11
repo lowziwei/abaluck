@@ -17,15 +17,30 @@ TIME_WINDOW_DAYS = 100
 # RVU file path template
 RVU_BASE_PATH = '/home/zl749/rvu_PPRRVUXX_partD.csv'
 
+# Medicare Conversion Factors (RVU to $)
+CONVERSION_RATES = {
+    2014: 35.8228,
+    2015: 35.9335,
+    2016: 35.8043,
+    2017: 35.8887,
+    2018: 35.9996,
+    2019: 36.0391,
+    2020: 36.0896,
+    2021: 34.8931,
+    2022: 34.6062,
+    2023: 33.8872,
+    2024: 33.2875
+}
+
 # Directories
 home_dir = os.path.expanduser('~')
 output_dir = os.path.join(home_dir, 'episode_outputs')
 temp_dir = os.path.join(home_dir, 'duckdb_temp')
-micro_data_dir = os.path.join(home_dir, 'micro_data')  # NEW: Directory for claim-level data
+micro_data_dir = os.path.join(home_dir, 'micro_data')
 
 os.makedirs(output_dir, exist_ok=True)
 os.makedirs(temp_dir, exist_ok=True)
-os.makedirs(micro_data_dir, exist_ok=True)  # NEW
+os.makedirs(micro_data_dir, exist_ok=True)
 
 np.random.seed(42)
 
@@ -33,8 +48,8 @@ np.random.seed(42)
 FACILITY_POS = {2, 19, 21, 22, 23, 24, 26, 31, 34, 41, 42, 51, 52, 53, 56, 61}
 NON_FACILITY_POS = {1, 3, 4, 11, 12, 13, 14, 15, 16, 17, 20, 25, 32, 33, 49, 50, 54, 55, 57, 60, 62, 65, 71, 72, 81, 99}
 
-# NEW: Toggle to use saved micro data or regenerate
-USE_SAVED_MICRO_DATA = False  # Set to True to load existing micro data, False to regenerate
+# Toggle to use saved micro data or regenerate
+USE_SAVED_MICRO_DATA = False
 
 print("="*100)
 print("EPISODE ANALYSIS WITH K-BAND CLASSIFICATION (LEVEL 1 CPT CODES ONLY)")
@@ -43,6 +58,7 @@ print(f"Sample: {SAMPLE_SIZE:,} patients per year")
 print(f"Episode definition: {DX_DIGITS}-digit DX codes, {TIME_WINDOW_DAYS}-day window")
 print(f"CPT filter: Level 1 only (5-digit numeric codes)")
 print(f"Use saved micro data: {USE_SAVED_MICRO_DATA}")
+print(f"Conversion factors: {CONVERSION_RATES}")
 print("="*100)
 
 def classify_encounter_level(proc_code):
@@ -317,6 +333,7 @@ def identify_99214_only_episodes(df, year):
     Returns:
     - df with 'only_99214' column added
     - k value (Work RVU + MP RVU) calculated from 99214-only episodes
+    - k_dollars value (k converted to dollars using conversion factor)
     """
     # For each episode, count total claims and 99214 claims
     episode_summary = df.groupby(['ENROLID', 'episode_id']).agg({
@@ -363,15 +380,28 @@ def identify_99214_only_episodes(df, year):
         
         k = modal_k[0] if len(modal_k) > 0 else mean_k
         
-        print(f"  [{year}] k from 99214-only episodes:")
-        print(f"    Modal k (Work + MP): {modal_k[0] if len(modal_k) > 0 else 'N/A':.2f}")
-        print(f"    Mean k (Work + MP): {mean_k:.2f}")
-        print(f"    Using k = {k:.2f}")
+        # Convert k to dollars using conversion factor
+        year_int = int(year)
+        conversion_factor = CONVERSION_RATES.get(year_int, None)
+        
+        if conversion_factor is not None:
+            k_dollars = k * conversion_factor
+            print(f"  [{year}] k from 99214-only episodes:")
+            print(f"    Modal k (Work + MP RVU): {modal_k[0] if len(modal_k) > 0 else 'N/A':.2f}")
+            print(f"    Mean k (Work + MP RVU): {mean_k:.2f}")
+            print(f"    Using k = {k:.2f} RVU")
+            print(f"    Conversion factor: ${conversion_factor:.4f}")
+            print(f"    k in dollars: ${k_dollars:.2f}")
+        else:
+            k_dollars = None
+            print(f"  [{year}] WARNING: No conversion factor for year {year}")
+            print(f"    Using k = {k:.2f} RVU (no dollar conversion)")
     else:
         print(f"  [{year}] WARNING: No 99214-only episodes found, cannot calculate k")
         k = None
+        k_dollars = None
     
-    return df, k
+    return df, k, k_dollars
 
 def analyze_year(year):
     """Analyze a single year with k-band classification (Level 1 CPT codes only)"""
@@ -390,7 +420,7 @@ def analyze_year(year):
     
     # Identify 99214-only episodes and calculate k (BEFORE aggregation)
     print(f"[{year}] Identifying 99214-only episodes...")
-    df, k = identify_99214_only_episodes(df, year)
+    df, k, k_dollars = identify_99214_only_episodes(df, year)
     
     # Prepare aggregation dict
     agg_dict = {}
@@ -405,7 +435,7 @@ def analyze_year(year):
     
     # Add only_99214 indicator to aggregation
     if 'only_99214' in df.columns:
-        agg_dict['only_99214'] = 'max'  # All claims in episode have same value
+        agg_dict['only_99214'] = 'max'
     
     # Aggregate to episode level
     print(f"[{year}] Aggregating to episode level...")
@@ -414,17 +444,38 @@ def analyze_year(year):
     # Calculate total Work + MP RVU per episode
     episodes['Total_Work_MP_RVU'] = episodes['WORK_RVU'] + episodes['MP_RVU']
     
+    # Get conversion factor for this year
+    year_int = int(year)
+    conversion_factor = CONVERSION_RATES.get(year_int, None)
+    
+    # Convert RVUs to dollars
+    if conversion_factor is not None:
+        episodes['Total_Work_MP_Dollars'] = episodes['Total_Work_MP_RVU'] * conversion_factor
+        episodes['TOTAL_RVU_Dollars'] = (
+            episodes['WORK_RVU'] + 
+            episodes['PE_RVU_actualized'].fillna(0) + 
+            episodes['MP_RVU']
+        ) * conversion_factor
+        episodes['conversion_factor'] = conversion_factor
+    else:
+        episodes['Total_Work_MP_Dollars'] = np.nan
+        episodes['TOTAL_RVU_Dollars'] = np.nan
+        episodes['conversion_factor'] = np.nan
+    
     # Create in_k_band indicator
     episodes['in_k_band'] = 0
     if k is not None:
-        episodes['k_threshold'] = k
+        episodes['k_threshold_RVU'] = k
+        episodes['k_threshold_Dollars'] = k_dollars if k_dollars is not None else np.nan
+        
         episodes.loc[
             (episodes['Total_Work_MP_RVU'] > 0) & 
             (episodes['Total_Work_MP_RVU'] <= k),
             'in_k_band'
         ] = 1
     else:
-        episodes['k_threshold'] = np.nan
+        episodes['k_threshold_RVU'] = np.nan
+        episodes['k_threshold_Dollars'] = np.nan
     
     # Calculate TOTPAY = PAY + COPAY + COINS + DEDUCT
     episodes['TOTPAY'] = (
@@ -460,37 +511,45 @@ def analyze_year(year):
     all_median_totpay = episodes['TOTPAY'].median()
     all_mean_total_rvu = episodes['TOTAL_RVU'].mean()
     all_median_total_rvu = episodes['TOTAL_RVU'].median()
+    all_mean_total_rvu_dollars = episodes['TOTAL_RVU_Dollars'].mean()
     
     # Stats for k-band episodes
     k_band_episodes = episodes[episodes['in_k_band'] == 1]
     k_mean_totpay = k_band_episodes['TOTPAY'].mean() if len(k_band_episodes) > 0 else np.nan
     k_median_totpay = k_band_episodes['TOTPAY'].median() if len(k_band_episodes) > 0 else np.nan
     k_mean_work_mp = k_band_episodes['Total_Work_MP_RVU'].mean() if len(k_band_episodes) > 0 else np.nan
+    k_mean_work_mp_dollars = k_band_episodes['Total_Work_MP_Dollars'].mean() if len(k_band_episodes) > 0 else np.nan
     k_mean_total_rvu = k_band_episodes['TOTAL_RVU'].mean() if len(k_band_episodes) > 0 else np.nan
+    k_mean_total_rvu_dollars = k_band_episodes['TOTAL_RVU_Dollars'].mean() if len(k_band_episodes) > 0 else np.nan
     
     # Stats for above-k episodes
     above_k_episodes = episodes[episodes['in_k_band'] == 0]
     above_k_mean_totpay = above_k_episodes['TOTPAY'].mean() if len(above_k_episodes) > 0 else np.nan
     above_k_median_totpay = above_k_episodes['TOTPAY'].median() if len(above_k_episodes) > 0 else np.nan
     above_k_mean_total_rvu = above_k_episodes['TOTAL_RVU'].mean() if len(above_k_episodes) > 0 else np.nan
+    above_k_mean_total_rvu_dollars = above_k_episodes['TOTAL_RVU_Dollars'].mean() if len(above_k_episodes) > 0 else np.nan
     
     # Print summary
     print(f"\n[{year}] SUMMARY:")
+    print(f"  Conversion factor: ${conversion_factor:.4f}" if conversion_factor else "  Conversion factor: N/A")
     print(f"  Total episodes (Level 1 only): {n_episodes:,}")
     print(f"  Episodes with only 99214: {n_only_99214:,} ({n_only_99214/n_episodes*100:.1f}%)")
-    print(f"  k threshold (Work + MP): {k:.2f}" if k is not None else "  k threshold: N/A")
+    if k is not None:
+        print(f"  k threshold: {k:.2f} RVU = ${k_dollars:.2f}" if k_dollars else f"  k threshold: {k:.2f} RVU")
+    else:
+        print(f"  k threshold: N/A")
     print(f"  Episodes in k-band (Work+MP ≤ k): {n_in_k_band:,} ({n_in_k_band/n_episodes*100:.1f}%)")
     print(f"  Episodes above k-band: {len(above_k_episodes):,} ({len(above_k_episodes)/n_episodes*100:.1f}%)")
     print(f"\n  ALL EPISODES:")
     print(f"    Mean TOTPAY: ${all_mean_totpay:,.2f}, Median: ${all_median_totpay:,.2f}")
-    print(f"    Mean TOTAL_RVU: {all_mean_total_rvu:.2f}, Median: {all_median_total_rvu:.2f}")
+    print(f"    Mean TOTAL_RVU: {all_mean_total_rvu:.2f} = ${all_mean_total_rvu_dollars:,.2f}")
     print(f"\n  K-BAND EPISODES:")
     print(f"    Mean TOTPAY: ${k_mean_totpay:,.2f}, Median: ${k_median_totpay:,.2f}")
-    print(f"    Mean Work+MP RVU: {k_mean_work_mp:.2f}")
-    print(f"    Mean TOTAL_RVU: {k_mean_total_rvu:.2f}")
+    print(f"    Mean Work+MP: {k_mean_work_mp:.2f} RVU = ${k_mean_work_mp_dollars:,.2f}")
+    print(f"    Mean TOTAL_RVU: {k_mean_total_rvu:.2f} = ${k_mean_total_rvu_dollars:,.2f}")
     print(f"\n  ABOVE-K EPISODES:")
     print(f"    Mean TOTPAY: ${above_k_mean_totpay:,.2f}, Median: ${above_k_median_totpay:,.2f}")
-    print(f"    Mean TOTAL_RVU: {above_k_mean_total_rvu:.2f}")
+    print(f"    Mean TOTAL_RVU: {above_k_mean_total_rvu:.2f} = ${above_k_mean_total_rvu_dollars:,.2f}")
     
     # Clean up
     del df, episodes, k_band_episodes, above_k_episodes
@@ -499,7 +558,9 @@ def analyze_year(year):
     # Results
     results = {
         'year': year,
-        'k_threshold': k,
+        'conversion_factor': conversion_factor,
+        'k_threshold_RVU': k,
+        'k_threshold_Dollars': k_dollars,
         'n_episodes': n_episodes,
         'n_only_99214': n_only_99214,
         'pct_only_99214': n_only_99214/n_episodes*100 if n_episodes > 0 else np.nan,
@@ -508,14 +569,17 @@ def analyze_year(year):
         'all_mean_totpay': all_mean_totpay,
         'all_median_totpay': all_median_totpay,
         'all_mean_total_rvu': all_mean_total_rvu,
-        'all_median_total_rvu': all_median_total_rvu,
+        'all_mean_total_rvu_dollars': all_mean_total_rvu_dollars,
         'k_band_mean_totpay': k_mean_totpay,
         'k_band_median_totpay': k_median_totpay,
-        'k_band_mean_work_mp': k_mean_work_mp,
+        'k_band_mean_work_mp_rvu': k_mean_work_mp,
+        'k_band_mean_work_mp_dollars': k_mean_work_mp_dollars,
         'k_band_mean_total_rvu': k_mean_total_rvu,
+        'k_band_mean_total_rvu_dollars': k_mean_total_rvu_dollars,
         'above_k_mean_totpay': above_k_mean_totpay,
         'above_k_median_totpay': above_k_median_totpay,
         'above_k_mean_total_rvu': above_k_mean_total_rvu,
+        'above_k_mean_total_rvu_dollars': above_k_mean_total_rvu_dollars,
     }
     
     return results
@@ -550,3 +614,4 @@ if len(all_results) > 0:
     print(f"  Episode-level data: ~/episode_outputs/episodes_level1_k_band_YYYY{sample_suffix}.csv (per year)")
     print(f"  Summary: {output_file}")
     print(f"\nNote: Set USE_SAVED_MICRO_DATA = True to reload existing micro data and skip merge/sampling")
+    print(f"      RVU values converted to dollars using year-specific conversion factors")
