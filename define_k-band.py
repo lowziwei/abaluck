@@ -514,12 +514,16 @@ def analyze_year(year):
 
     # Calculate TOTPAY
     episodes['TOTPAY'] = (
-        episodes['PAY'] +
-        episodes['COPAY'] +
-        episodes['COINS'] +
-        episodes['DEDUCT']
+        episodes['PAY'] 
     )
-
+    
+    # Calculate OOP
+    episodes['OOP'] = (
+        episodes['COINS'] +
+        episodes['COB'] + 
+        episodes['DEDUCT'] 
+    )
+    
     # Calculate TOTAL_RVU
     episodes['TOTAL_RVU'] = (
         episodes['WORK_RVU'] +
