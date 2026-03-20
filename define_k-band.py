@@ -9,7 +9,7 @@ import gc
 DATASET_TYPE = "MEDICARE_SET_A"
 DATABASE = "MDCR"
 TABLE_CODE = "O"
-YEARS = [str(year) for year in range(2014, 2025)]
+YEARS = [str(year) for year in range(2014, 2019)]
 SAMPLE_SIZE = 15000
 DX_DIGITS = 3
 TIME_WINDOW_DAYS = 100
