@@ -520,7 +520,7 @@ def analyze_year(year):
     # Calculate OOP
     episodes['OOP'] = (
         episodes['COINS'] +
-        episodes['COB'] + 
+        episodes['COPAY'] + 
         episodes['DEDUCT'] 
     )
     
