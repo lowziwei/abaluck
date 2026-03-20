@@ -197,7 +197,7 @@ def load_or_create_claim_data(year):
     print(f"[{year}] Creating claim data from raw files...")
 
     # Load RVU data
- rvu_df = load_rvu_data(year)
+    rvu_df = load_rvu_data(year)
     if rvu_df is None:
         print(f"[{year}] Cannot create claim data without RVU file")
         return None
