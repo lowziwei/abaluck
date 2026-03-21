@@ -68,6 +68,8 @@ output_columns = [
     'PAY',
     'COPAY',
     'COINS',
+    'NETPAY',
+    'OOP',
     'DEDUCT',
     'COB',
     'conversion_factor'
