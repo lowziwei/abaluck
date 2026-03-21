@@ -66,11 +66,11 @@ output_columns = [
     'MP_RVU',
     'PE_RVU_actualized',
     'PAY',
+    'NETPAY',
     'COPAY',
     'COINS',
-    'NETPAY',
-    'OOP',
     'DEDUCT',
+    'OOP',
     'COB',
     'conversion_factor'
 ]
