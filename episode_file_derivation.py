@@ -56,6 +56,7 @@ output_columns = [
     'R_Dollars_inc_COB',
     'R_Dollars_omit_COB',
     'n_claims',
+    'n_visit',
     'only_99213',
     'only_99214',
     'contains_99213',
