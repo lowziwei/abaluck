@@ -361,6 +361,12 @@ def create_episode_indicators(df, year):
 
     episode_summary.columns = ['ENROLID', 'episode_id', 'n_claims', 'n_unique_codes', 'proc_list']
 
+    # Code enumerator for office visits per episode
+    VISIT_CODES = {'99214', '99213', 'G0463', '99212', '99203', '99204', '99215', 'G0439', 'G2211'}
+    episode_summary['n_visit'] = df.groupby(['ENROLID', 'episode_id'])['PROC1'].apply(
+    lambda x: x.isin(VISIT_CODES).sum()
+    ).reset_index(drop=True)
+    
     # Contains 99213 (regardless if only)
     episode_summary['contains_99213'] = episode_summary['proc_list'].apply(
         lambda x: 1 if '99213' in x else 0
@@ -386,7 +392,7 @@ def create_episode_indicators(df, year):
     # Merge back to main df
     df = df.merge(
         episode_summary[['ENROLID', 'episode_id', 'n_claims', 'contains_99213', 'contains_99214',
-                        'only_99213', 'only_99214']],
+                        'only_99213', 'only_99214', 'n_visit']],
         on=['ENROLID', 'episode_id'],
         how='left'
     )
@@ -445,7 +451,7 @@ def analyze_year(year):
                   'PAY', 'COPAY', 'COINS', 'DEDUCT', 'NETPAY', 'COB',
                   'WORK_RVU', 'MP_RVU', 'PE_RVU_actualized',
                   'FACILITY_PE_RVU', 'NON-FAC_PE_RVU',
-                  'n_claims', 'contains_99213', 'contains_99214', 'only_99213', 'only_99214']
+                  'n_claims', 'contains_99213', 'contains_99214', 'only_99213', 'only_99214', 'n_visit']
 
     claim_output = df[claim_cols].copy()
     claim_output.to_csv(claim_file, index=False)
@@ -464,7 +470,7 @@ def analyze_year(year):
             agg_dict[col] = 'sum'
 
     # Add episode indicators (use max since all claims in episode have same value)
-    for col in ['n_claims', 'contains_99213', 'contains_99214', 'only_99213', 'only_99214']:
+    for col in ['n_claims', 'contains_99213', 'contains_99214', 'only_99213', 'only_99214', 'n_visit']:
         if col in df.columns:
             agg_dict[col] = 'max'
 
