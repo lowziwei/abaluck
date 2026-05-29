@@ -1,0 +1,152 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import stats
+import os
+
+# Settings
+YEARS = [str(year) for year in range(2014, 2019)]  # 2014-2018
+SAMPLE_SIZE = 15000
+output_dir = '/home/zl749/episode_outputs'
+
+print("="*100)
+print("BIN SCATTER: R_RVU vs m_RVU (2014-2018)")
+print("="*100)
+
+# Load and combine all years
+all_episodes = []
+
+for year in YEARS:
+    sample_suffix = f"_sample{SAMPLE_SIZE}" if SAMPLE_SIZE else "_all"
+    episode_file = os.path.join(output_dir, f'episodes_level1_k_band_{year}{sample_suffix}.csv')
+    
+    if not os.path.exists(episode_file):
+        print(f"[{year}] File not found: {episode_file}")
+        continue
+    
+    try:
+        episodes = pd.read_csv(episode_file)
+        print(f"[{year}] Loaded {len(episodes):,} episodes")
+        all_episodes.append(episodes)
+    except Exception as e:
+        print(f"[{year}] Error loading: {e}")
+
+if len(all_episodes) == 0:
+    print("No data loaded!")
+    exit()
+
+# Combine all years
+combined = pd.concat(all_episodes, ignore_index=True)
+print(f"\nCombined: {len(combined):,} total episodes (2014-2018)")
+
+# Calculate m_RVU and R_RVU
+combined['m_RVU'] = combined['WORK_RVU'] + combined['MP_RVU']
+combined['R_RVU'] = combined['WORK_RVU'] + combined['MP_RVU'] + combined['PE_RVU_actualized'].fillna(0)
+
+# Remove zeros and missing values
+valid_data = combined[(combined['m_RVU'] > 0) & (combined['R_RVU'] > 0)].copy()
+print(f"Valid episodes (m_RVU > 0, R_RVU > 0): {len(valid_data):,}")
+
+# Create bins for m_RVU
+n_bins = 50
+valid_data['m_RVU_bin'] = pd.qcut(valid_data['m_RVU'], q=n_bins, duplicates='drop')
+
+# Calculate bin centers and means
+bin_stats = valid_data.groupby('m_RVU_bin', observed=True).agg({
+    'm_RVU': ['mean', 'median', 'count'],
+    'R_RVU': ['mean', 'median']
+}).reset_index()
+
+bin_stats.columns = ['bin', 'm_RVU_mean', 'm_RVU_median', 'count', 'R_RVU_mean', 'R_RVU_median']
+
+# Use mean for bin scatter
+x = bin_stats['m_RVU_mean'].values
+y = bin_stats['R_RVU_mean'].values
+
+# Fit quadratic: R_RVU = a + b*m_RVU + c*m_RVU^2
+coefficients = np.polyfit(x, y, 2)
+a, b, c = coefficients[2], coefficients[1], coefficients[0]
+
+# Generate fitted line
+x_fit = np.linspace(x.min(), x.max(), 200)
+y_fit = a + b*x_fit + c*x_fit**2
+
+# Calculate R-squared
+y_pred = a + b*x + c*x**2
+ss_res = np.sum((y - y_pred)**2)
+ss_tot = np.sum((y - y.mean())**2)
+r_squared = 1 - (ss_res / ss_tot)
+
+# Print results
+print(f"\n{'='*100}")
+print("QUADRATIC FIT RESULTS: R_RVU = a + b*m_RVU + c*m_RVU^2")
+print("="*100)
+print(f"Intercept (a):        {a:.6f}")
+print(f"Linear coef (b):      {b:.6f}")
+print(f"Quadratic coef (c):   {c:.6f}")
+print(f"R-squared:            {r_squared:.6f}")
+print(f"Number of bins:       {len(x)}")
+print(f"Episodes per bin:     {bin_stats['count'].mean():.1f} (mean), {bin_stats['count'].median():.1f} (median)")
+print("="*100)
+
+# Create plot
+fig, ax = plt.subplots(figsize=(12, 8))
+
+# Scatter plot of binned means
+ax.scatter(x, y, s=100, alpha=0.6, color='steelblue', edgecolors='black', 
+           label=f'Binned means (n={n_bins} bins)', zorder=3)
+
+# Quadratic fit line
+ax.plot(x_fit, y_fit, 'r-', linewidth=2.5, 
+        label=f'Quadratic fit: R_RVU = {a:.3f} + {b:.3f}*m_RVU + {c:.3f}*m_RVU²\nR² = {r_squared:.4f}',
+        zorder=2)
+
+# 45-degree line (R_RVU = m_RVU, no PE component)
+max_val = max(x.max(), y.max())
+ax.plot([0, max_val], [0, max_val], 'k--', linewidth=1.5, alpha=0.5, 
+        label='45° line (R_RVU = m_RVU)', zorder=1)
+
+ax.set_xlabel('m_RVU (Work + MP)', fontsize=13, fontweight='bold')
+ax.set_ylabel('R_RVU (Work + MP + PE_actualized)', fontsize=13, fontweight='bold')
+ax.set_title('Binned Scatter: R_RVU vs m_RVU (2014-2018)\nEpisode-Level Analysis, Level 1 CPT Codes Only', 
+             fontsize=15, fontweight='bold')
+ax.legend(loc='upper left', fontsize=11, framealpha=0.95)
+ax.grid(True, alpha=0.3)
+
+# Save plot
+sample_suffix = f"_sample{SAMPLE_SIZE}" if SAMPLE_SIZE else "_all"
+plot_file = os.path.join(output_dir, f'binscatter_R_RVU_vs_m_RVU_2014_2018{sample_suffix}.png')
+plt.tight_layout()
+plt.savefig(plot_file, dpi=300, bbox_inches='tight')
+print(f"\n✓ Plot saved to: {plot_file}")
+plt.close()
+
+# Save bin statistics
+stats_file = os.path.join(output_dir, f'binscatter_stats_2014_2018{sample_suffix}.csv')
+bin_stats.to_csv(stats_file, index=False)
+print(f"✓ Bin statistics saved to: {stats_file}")
+
+# Save quadratic coefficients
+coef_data = {
+    'intercept_a': [a],
+    'linear_b': [b],
+    'quadratic_c': [c],
+    'r_squared': [r_squared],
+    'n_bins': [len(x)],
+    'n_episodes': [len(valid_data)],
+    'years': ['2014-2018']
+}
+coef_df = pd.DataFrame(coef_data)
+coef_file = os.path.join(output_dir, f'quadratic_coefficients_2014_2018{sample_suffix}.csv')
+coef_df.to_csv(coef_file, index=False)
+print(f"✓ Quadratic coefficients saved to: {coef_file}")
+
+print(f"\n{'='*100}")
+print("SUMMARY STATISTICS")
+print("="*100)
+print(f"m_RVU range: [{valid_data['m_RVU'].min():.2f}, {valid_data['m_RVU'].max():.2f}]")
+print(f"m_RVU mean: {valid_data['m_RVU'].mean():.2f}, median: {valid_data['m_RVU'].median():.2f}")
+print(f"R_RVU range: [{valid_data['R_RVU'].min():.2f}, {valid_data['R_RVU'].max():.2f}]")
+print(f"R_RVU mean: {valid_data['R_RVU'].mean():.2f}, median: {valid_data['R_RVU'].median():.2f}")
+print(f"PE_RVU (R_RVU - m_RVU) mean: {(valid_data['R_RVU'] - valid_data['m_RVU']).mean():.2f}")
+print("="*100)
